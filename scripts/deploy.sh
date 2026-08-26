@@ -34,8 +34,24 @@ else
 fi
 IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}/${SERVICE}:$(date +%Y%m%d-%H%M%S)"
 
-# ---- API_KEY: đọc từ Secret Manager (khuyến nghị) ------------------------
+# ---- API_KEY -------------------------------------------------------------
+# Mặc định truyền qua --set-env-vars, KHỚP với .github/workflows/deploy.yml
+# (đường deploy thật) — đặt API_KEY trong môi trường trước khi chạy:
+#   API_KEY=<key> bash scripts/deploy.sh
+# Không dùng Secret Manager mặc định nữa vì không ai trong team có
+# secretmanager.versions.access trên project này: key đã nằm trong secret thì
+# không đọc lại được và cũng không thêm version mới được. Đánh đổi: giá trị hiện
+# nguyên văn trong `gcloud run services describe` / Cloud Console.
+# USE_SECRET_MANAGER=1 để quay lại đường Secret Manager khi đã có quyền — nhưng
+# khi đó PHẢI sửa cả deploy.yml, không thì lần push sau CI deploy lại bằng env
+# var và ghi đè.
+USE_SECRET_MANAGER="${USE_SECRET_MANAGER:-0}"
 SECRET_NAME="${SECRET_NAME:-video-render-api-key}"
+if [ "${USE_SECRET_MANAGER}" != "1" ] && [ -z "${API_KEY:-}" ]; then
+  echo "Thiếu API_KEY. Chạy lại:  API_KEY=<key> bash scripts/deploy.sh" >&2
+  echo "(hoặc USE_SECRET_MANAGER=1 để dùng Secret Manager)" >&2
+  exit 1
+fi
 
 echo "==> Project: ${PROJECT_ID} | Region: ${REGION}"
 
@@ -62,45 +78,73 @@ else
   echo "==> Dùng service account có sẵn: ${SA_EMAIL}"
 fi
 
-echo "==> Tạo secret API_KEY nếu chưa có"
-if ! gcloud secrets describe "${SECRET_NAME}" >/dev/null 2>&1; then
-  GENERATED_KEY=$(openssl rand -hex 32)
-  printf '%s' "${GENERATED_KEY}" | gcloud secrets create "${SECRET_NAME}" --data-file=-
-  echo "    Đã tạo API_KEY mới, LƯU LẠI NGAY (chỉ hiện một lần ở đây):"
-  echo "    ${GENERATED_KEY}"
-else
-  echo "    Secret đã có sẵn, giữ nguyên giá trị."
-fi
-
-echo "==> Cấp quyền đọc secret cho SA"
-SECRET_ACCESS_GRANTED=1
-if ! gcloud secrets add-iam-policy-binding "${SECRET_NAME}" \
-       --member="serviceAccount:${SA_EMAIL}" \
-       --role="roles/secretmanager.secretAccessor" 2>/tmp/vrs_secret_iam_err.log; then
-  SECRET_ACCESS_GRANTED=0
-  echo "    KHÔNG gán được quyền (thường do tài khoản của bạn thiếu quyền"
-  echo "    secretmanager.secrets.setIamPolicy — chỉ Owner/Admin cấp được):"
-  tail -1 /tmp/vrs_secret_iam_err.log
-fi
-
 BASE_ENV_VARS="WORK_DIR=/tmp/jobs,MAX_DOWNLOAD_MB=4096,MAX_FOLDER_VIDEOS=30,MAX_CONCURRENT_JOBS=1,JOB_TTL_SECONDS=3600,LOG_LEVEL=INFO"
-if [ "${SECRET_ACCESS_GRANTED}" = "1" ]; then
-  DEPLOY_ENV_FLAGS=(--set-env-vars="${BASE_ENV_VARS}" --set-secrets="API_KEY=${SECRET_NAME}:latest")
+SECRET_ACCESS_GRANTED=1
+
+if [ "${USE_SECRET_MANAGER}" != "1" ]; then
+  # ^@^ đổi dấu phân tách của --set-env-vars từ "," sang "@" để key có chứa dấu
+  # phẩy không bị gcloud hiểu là bắt đầu một biến môi trường mới.
+  DEPLOY_ENV_FLAGS=(--set-env-vars="^@^${BASE_ENV_VARS//,/@}@API_KEY=${API_KEY}")
 else
-  # Không đọc lại được giá trị secret cũ (cùng thiếu quyền) -> sinh key MỚI,
-  # truyền trực tiếp qua env var. Kém an toàn hơn Secret Manager: giá trị hiện
-  # nguyên văn trong `gcloud run services describe` / Cloud Console, ai có
-  # quyền xem cấu hình service (ví dụ role run.viewer/run.admin) cũng đọc được.
-  # Vẫn là cách duy nhất chạy được khi thiếu quyền IAM ở bước trên — sửa lại
-  # bằng --set-secrets khi có ai đó (Owner) cấp secretAccessor cho SA.
-  FALLBACK_KEY=$(openssl rand -hex 32)
-  echo "    -> Dùng key mới qua biến môi trường (kém an toàn hơn), LƯU LẠI NGAY:"
-  echo "    ${FALLBACK_KEY}"
-  DEPLOY_ENV_FLAGS=(--set-env-vars="${BASE_ENV_VARS},API_KEY=${FALLBACK_KEY}")
+  echo "==> Tạo secret API_KEY nếu chưa có"
+  if ! gcloud secrets describe "${SECRET_NAME}" >/dev/null 2>&1; then
+    GENERATED_KEY=$(openssl rand -hex 32)
+    printf '%s' "${GENERATED_KEY}" | gcloud secrets create "${SECRET_NAME}" --data-file=-
+    echo "    Đã tạo API_KEY mới, LƯU LẠI NGAY (chỉ hiện một lần ở đây):"
+    echo "    ${GENERATED_KEY}"
+  else
+    echo "    Secret đã có sẵn, giữ nguyên giá trị."
+  fi
+
+  echo "==> Cấp quyền đọc secret cho SA"
+  if ! gcloud secrets add-iam-policy-binding "${SECRET_NAME}" \
+         --member="serviceAccount:${SA_EMAIL}" \
+         --role="roles/secretmanager.secretAccessor" 2>/tmp/vrs_secret_iam_err.log; then
+    SECRET_ACCESS_GRANTED=0
+    echo "    KHÔNG gán được quyền (thường do tài khoản của bạn thiếu quyền"
+    echo "    secretmanager.secrets.setIamPolicy — chỉ Owner/Admin cấp được):"
+    tail -1 /tmp/vrs_secret_iam_err.log
+  fi
+
+  if [ "${SECRET_ACCESS_GRANTED}" = "1" ]; then
+    DEPLOY_ENV_FLAGS=(--set-env-vars="${BASE_ENV_VARS}" --set-secrets="API_KEY=${SECRET_NAME}:latest")
+  else
+    # Không đọc lại được giá trị secret cũ (cùng thiếu quyền) -> sinh key MỚI,
+    # truyền trực tiếp qua env var. Kém an toàn hơn Secret Manager: giá trị hiện
+    # nguyên văn trong `gcloud run services describe` / Cloud Console, ai có
+    # quyền xem cấu hình service (ví dụ role run.viewer/run.admin) cũng đọc được.
+    # Vẫn là cách duy nhất chạy được khi thiếu quyền IAM ở bước trên — sửa lại
+    # bằng --set-secrets khi có ai đó (Owner) cấp secretAccessor cho SA.
+    FALLBACK_KEY=$(openssl rand -hex 32)
+    echo "    -> Dùng key mới qua biến môi trường (kém an toàn hơn), LƯU LẠI NGAY:"
+    echo "    ${FALLBACK_KEY}"
+    DEPLOY_ENV_FLAGS=(--set-env-vars="${BASE_ENV_VARS},API_KEY=${FALLBACK_KEY}")
+  fi
 fi
 
 echo "==> Build image"
 gcloud builds submit --tag "${IMAGE}" .
+
+# Chuyển secret binding -> env var phải làm bằng HAI lệnh gcloud. Một lệnh thì
+# không được: gcloud áp _GetEnvChanges TRƯỚC _GetSecretsChanges
+# (command_lib/run/flags.py) và EnvVarLiteralChanges chỉ ghi vào
+# container.env_vars.literals, nên set API_KEY dạng literal khi nó còn là secret
+# ref sẽ chết với "Cannot update environment variable [API_KEY] to string
+# literal because it has already been set with a different type."
+#
+# Lệnh dưới tạo ra revision KHÔNG có API_KEY -> container không boot được (xem
+# validator api_key trong app/config.py) và gcloud trả non-zero, nên phải
+# "|| true". An toàn: Cloud Run không chuyển traffic sang revision chưa ready,
+# service vẫn chạy bằng revision cũ cho tới lệnh deploy bên dưới. Chỉ chạy đúng
+# một lần nhờ điều kiện grep. (Giả định: API_KEY là secret DUY NHẤT mà service
+# này mount — thêm secret khác thì phải sửa lại chỗ này.)
+if [ "${USE_SECRET_MANAGER}" != "1" ] \
+   && gcloud run services describe "${SERVICE}" --region="${REGION}" \
+        --format='value(spec.template.spec.containers[0].env)' 2>/dev/null \
+      | grep -q secretKeyRef; then
+  echo "==> Bỏ secret binding API_KEY (một lần; revision trung gian sẽ fail)"
+  gcloud run services update "${SERVICE}" --region="${REGION}" --clear-secrets || true
+fi
 
 echo "==> Deploy"
 gcloud run deploy "${SERVICE}" \
@@ -142,7 +186,12 @@ $([ -n "${SA_EMAIL_OVERRIDE}" ] && echo "     CẢNH BÁO: đây là SA có sẵ
      không có h2. Bật --use-http2 làm Cloud Run proxy xuống container bằng
      HTTP/2 và toàn bộ request bị 502 Bad Gateway ngay từ Google Frontend,
      kể cả /docs hay /healthz — đã tự kiểm chứng lúc soạn script này.
-$([ "${SECRET_ACCESS_GRANTED}" = "0" ] && echo "  7. API_KEY đang truyền qua --set-env-vars (KHÔNG qua Secret Manager) vì
+$([ "${USE_SECRET_MANAGER}" != "1" ] && echo "  7. API_KEY truyền qua --set-env-vars, KHÔNG qua Secret Manager (khớp với
+     .github/workflows/deploy.yml). Giá trị hiện nguyên văn trong cấu hình
+     service: ai có role run.viewer/run.admin trên project cũng đọc được key.
+     Đổi key = deploy lại với API_KEY khác, và phải sửa repo secret
+     RENDER_API_KEY trên GitHub cho khớp, không thì lần push sau CI deploy lại
+     key cũ.")$([ "${USE_SECRET_MANAGER}" = "1" ] && [ "${SECRET_ACCESS_GRANTED}" = "0" ] && echo "  7. API_KEY đang truyền qua --set-env-vars (KHÔNG qua Secret Manager) vì
      tài khoản chạy script thiếu quyền secretmanager.secrets.setIamPolicy.
      Giá trị hiện nguyên văn trong cấu hình service — ai xem được service này
      (role run.viewer/run.admin) cũng đọc được key. Nhờ Owner của project chạy:

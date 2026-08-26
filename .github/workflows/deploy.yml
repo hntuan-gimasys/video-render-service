@@ -24,8 +24,9 @@ env:
   REPO: ${{ vars.ARTIFACT_REPO || 'containers' }}
   # Service account mà container CHẠY BẰNG (phải được share thư mục Drive).
   RUNTIME_SA: ${{ vars.RUNTIME_SERVICE_ACCOUNT }}
-  # Secret Manager chứa API_KEY — mount vào container qua --set-secrets.
-  API_KEY_SECRET: ${{ vars.API_KEY_SECRET_NAME || 'video-render-api-key' }}
+  # API_KEY KHÔNG khai ở đây: nó là repo secret RENDER_API_KEY, truyền vào ở
+  # step "Deploy to Cloud Run" — xem chú thích tại đó để biết vì sao không đi
+  # qua Secret Manager nữa.
 
 jobs:
   test:
@@ -124,8 +125,56 @@ jobs:
 
       # Deploy bằng tag SHA chứ không phải :latest — Cloud Run ghim đúng digest
       # đã build ở bước trên, và rollback chỉ là deploy lại một SHA cũ.
+      #
+      # API_KEY đi qua repo secret RENDER_API_KEY, KHÔNG qua Secret Manager:
+      # không ai trong team có secretmanager.versions.access trên secret
+      # video-render-api-key, nên giá trị sinh ra lúc tạo secret không đọc lại
+      # được và cũng không thêm version mới được — key thành bất khả dụng và mọi
+      # request nhận 401 UNAUTHORIZED. Đánh đổi: key hiện nguyên văn trong
+      # `gcloud run services describe` và Cloud Console, ai có role
+      # run.viewer/run.admin cũng đọc được — đúng cái đánh đổi mà nhánh fallback
+      # của scripts/deploy.sh đã ghi. Muốn quay lại Secret Manager: xin Owner cấp
+      # roles/secretmanager.secretVersionAdder cho DEPLOYER_SERVICE_ACCOUNT rồi
+      # sửa cả step này và scripts/deploy.sh (USE_SECRET_MANAGER=1).
       - name: Deploy to Cloud Run
+        env:
+          API_KEY: ${{ secrets.RENDER_API_KEY }}
         run: |
+          # Thiếu key thì Settings (app/config.py) raise ngay lúc import: revision
+          # mới không bao giờ ready và CI chỉ báo "failed to start", không nói gì
+          # về API_KEY. Chặn tại đây để lỗi chỉ đúng nguyên nhân.
+          if [ -z "${API_KEY}" ]; then
+            echo "::error::Thiếu repo secret RENDER_API_KEY (Settings > Secrets and variables > Actions)"
+            exit 1
+          fi
+
+          # Chuyển secret binding -> env var phải làm bằng HAI lệnh. Một lệnh thì
+          # không được: gcloud áp _GetEnvChanges TRƯỚC _GetSecretsChanges
+          # (command_lib/run/flags.py) và EnvVarLiteralChanges chỉ ghi vào
+          # container.env_vars.literals, nên set API_KEY dạng literal khi nó còn
+          # là secret ref sẽ chết với "Cannot update environment variable
+          # [API_KEY] to string literal because it has already been set with a
+          # different type."
+          #
+          # Lệnh dưới tạo ra revision KHÔNG có API_KEY -> container không boot
+          # được và gcloud trả non-zero, nên phải "|| true". An toàn: Cloud Run
+          # không chuyển traffic sang revision chưa ready, service vẫn chạy bằng
+          # revision cũ cho tới lệnh deploy phía dưới. Chỉ chạy đúng một lần nhờ
+          # điều kiện grep. (Giả định: API_KEY là secret DUY NHẤT mà service này
+          # mount — thêm secret khác thì phải sửa lại chỗ này.)
+          if gcloud run services describe "${SERVICE}" \
+               --region="${REGION}" --project="${PROJECT_ID}" \
+               --format='value(spec.template.spec.containers[0].env)' \
+               | grep -q secretKeyRef; then
+            echo "==> Bỏ secret binding API_KEY (một lần; revision trung gian sẽ fail)"
+            gcloud run services update "${SERVICE}" \
+              --region="${REGION}" --project="${PROJECT_ID}" \
+              --clear-secrets || true
+          fi
+
+          # ^@^ đổi dấu phân tách của --set-env-vars từ "," sang "@": key do
+          # người đặt nên không loại trừ được dấu phẩy, mà dấu phẩy trong giá trị
+          # sẽ bị gcloud hiểu là bắt đầu một biến môi trường mới.
           gcloud run deploy "${SERVICE}" \
             --image="${{ steps.image.outputs.sha_tag }}" \
             --region="${REGION}" \
@@ -142,8 +191,7 @@ jobs:
             --min-instances=1 \
             --max-instances=1 \
             --allow-unauthenticated \
-            --set-env-vars="WORK_DIR=/tmp/jobs,MAX_DOWNLOAD_MB=4096,MAX_FOLDER_VIDEOS=30,MAX_CONCURRENT_JOBS=1,JOB_TTL_SECONDS=3600,LOG_LEVEL=INFO" \
-            --set-secrets="API_KEY=${API_KEY_SECRET}:latest"
+            --set-env-vars="^@^WORK_DIR=/tmp/jobs@MAX_DOWNLOAD_MB=4096@MAX_FOLDER_VIDEOS=30@MAX_CONCURRENT_JOBS=1@JOB_TTL_SECONDS=3600@LOG_LEVEL=INFO@API_KEY=${API_KEY}"
 
       # Không có bước kiểm sau deploy: /healthz (SPEC §3.5) KHÔNG gọi được trên
       # Cloud Run — frontend của Google nuốt đúng path đó và trả 404 HTML của
