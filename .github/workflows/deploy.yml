@@ -145,17 +145,18 @@ jobs:
             --set-env-vars="WORK_DIR=/tmp/jobs,MAX_DOWNLOAD_MB=4096,MAX_FOLDER_VIDEOS=30,MAX_CONCURRENT_JOBS=1,JOB_TTL_SECONDS=3600,LOG_LEVEL=INFO" \
             --set-secrets="API_KEY=${API_KEY_SECRET}:latest"
 
-      # /healthz không cần auth (SPEC §3.5) nên kiểm được ngay mà không cần key.
-      # Xác nhận luôn WORK_DIR đúng là /tmp/jobs — cảnh báo path-mangling trong
-      # scripts/deploy.sh không áp dụng ở runner Linux, nhưng vẫn nên tự mắt thấy.
-      - name: Smoke check
+      # Không có bước kiểm sau deploy: /healthz (SPEC §3.5) KHÔNG gọi được trên
+      # Cloud Run — frontend của Google nuốt đúng path đó và trả 404 HTML của
+      # chính nó, request không bao giờ tới container. Đã đo trên service thật:
+      # /healthz -> 404 từ Google (không có header x-cloud-trace-context), trong
+      # khi /healthzz, /health, /Healthz, /api/healthz đều tới được app và nhận
+      # 404 JSON của FastAPI. Route trong app vẫn đăng ký đúng, có mặt trong
+      # /openapi.json — chỉ là không ai gọi tới được từ bên ngoài.
+      #
+      # Muốn có lại bước kiểm thì phải nhắm vào path khác (/openapi.json trả
+      # 200, hoặc /api/jobs không kèm key trả 401), vì mọi lần curl /healthz đều
+      # đỏ dù service hoàn toàn khoẻ.
+      - name: Show service URL
         run: |
-          URL=$(gcloud run services describe "${SERVICE}" \
-            --region="${REGION}" --project="${PROJECT_ID}" --format='value(status.url)')
-          echo "Service URL: ${URL}"
-          curl --fail --silent --show-error --retry 5 --retry-delay 5 \
-            --retry-all-errors "${URL}/healthz"
-          echo
           gcloud run services describe "${SERVICE}" \
-            --region="${REGION}" --project="${PROJECT_ID}" \
-            --format="yaml(spec.template.spec.containers[0].env)"
+            --region="${REGION}" --project="${PROJECT_ID}" --format='value(status.url)'
