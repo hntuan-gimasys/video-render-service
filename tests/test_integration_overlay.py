@@ -142,8 +142,21 @@ async def test_glyph_height_matches_requested_pixel_size(tmp_path: Path) -> None
     box = bright_bbox(data, 720, 1280)
     assert box is not None
     cap_height = box[3] - box[1] + 1
-    # Chữ hoa cao khoảng 66–75% cỡ chữ (phần còn lại dành cho dấu và đuôi chữ).
-    assert 0.6 <= cap_height / 100 <= 0.8, f"chữ hoa cao {cap_height}px trên cỡ 100px"
+    # Chữ hoa KHÔNG cao bằng cỡ chữ — nó chỉ là một phần của cỡ chữ, và phần đó
+    # bao nhiêu thì tuỳ font lẫn cách libass quy FontSize ra pixel:
+    #
+    #   libass gọi FreeType với FT_SIZE_REQUEST_TYPE_REAL_DIM, nghĩa là FontSize
+    #   ứng với (ascender - descender) chứ KHÔNG phải ô em.
+    #   Liberation Serif: capHeight=1341, em=2048, ascender-descender=2268
+    #     -> real_dim: 1341/2268 = 0.591   (đo thật trên CI: 0.590)
+    #     -> nominal : 1341/2048 = 0.655   (nếu libass đổi sang quy theo em)
+    #
+    # Băng dưới đây phủ CẢ HAI quy ước để đổi bản libass không làm đỏ CI vô cớ,
+    # nhưng vẫn bắt được đúng thứ test này sinh ra để canh: hệ toạ độ sai. Rơi
+    # lại PlayResY=288 trên khung 1280 là lệch 4.4 lần (ratio ~2.6 hoặc ~0.13),
+    # cách băng này rất xa. Đo lại bằng scripts/diagnose_glyph_size.py.
+    ratio = cap_height / 100
+    assert 0.55 <= ratio <= 0.72, f"chữ hoa cao {cap_height}px trên cỡ 100px (ratio {ratio})"
 
 
 # --------------------------------------------------------------------------- #

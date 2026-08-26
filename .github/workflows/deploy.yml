@@ -63,17 +63,6 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      # TẠM THỜI — đang truy vì sao test_glyph_height_matches_requested_pixel_size
-      # đo được 59px trên cỡ chữ 100 (ngưỡng test đòi >= 60). Script chỉ in số đo,
-      # không assert; continue-on-error để lỗi trong script không che kết quả test
-      # thật bên dưới. Xoá cả bước này lẫn scripts/diagnose_glyph_size.py khi
-      # đã chốt được ngưỡng đúng.
-      - name: Diagnose glyph sizing (temporary)
-        continue-on-error: true
-        run: |
-          pip install fonttools
-          python scripts/diagnose_glyph_size.py
-
       - name: Run tests
         # Test tự set API_KEY/WORK_DIR qua monkeypatch (tests/api/conftest.py),
         # không cần secret nào.

@@ -14,7 +14,14 @@ thất bại: do libass chọn NHẦM FONT, hay do NGƯỠNG trong test sai ngay
   (quy FontSize theo ascender-descender). Khớp ``expect_nominal`` -> quy theo em.
 
 Script chỉ ĐO và IN, không assert gì — nó là công cụ chẩn đoán, không phải test.
-Xoá đi khi đã chốt được ngưỡng đúng.
+
+Kết quả đo trên CI (ubuntu-latest, Liberation Serif 2.x) ngày 2026-08-26:
+ratio = 0.590 ở mọi cỡ chữ, đúng bằng capHeight/(ascender-descender) = 0.591.
+Đó là con số đã dùng để đặt lại ngưỡng trong
+``tests/test_integration_overlay.py::test_glyph_height_matches_requested_pixel_size``.
+Chạy lại script này (cần ffmpeg + fontconfig) khi cần canh lại ngưỡng đó.
+
+    python scripts/diagnose_glyph_size.py
 """
 
 from __future__ import annotations
