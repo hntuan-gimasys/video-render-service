@@ -1,0 +1,147 @@
+name: Deploy to Cloud Run
+
+# Push lên main -> chạy test -> build image -> push Artifact Registry -> deploy.
+# Cờ deploy ở job "deploy" phải khớp với scripts/deploy.sh; sửa một bên thì
+# sửa cả bên kia, nếu không deploy tay và deploy tự động sẽ cho ra hai cấu hình
+# khác nhau trên cùng một service.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Service chạy --max-instances=1 (job state nằm trong RAM, xem docs/SPEC.md §1).
+# Hai lần deploy chồng nhau sẽ thay instance giữa chừng và giết job đang chạy,
+# nên xếp hàng thay vì chạy song song — và KHÔNG cancel-in-progress, để một
+# deploy đang dở không bị bỏ giữa chừng.
+concurrency:
+  group: deploy-cloud-run
+  cancel-in-progress: false
+
+env:
+  PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+  REGION: ${{ vars.GCP_REGION || 'asia-southeast1' }}
+  SERVICE: ${{ vars.CLOUD_RUN_SERVICE || 'video-render-service' }}
+  REPO: ${{ vars.ARTIFACT_REPO || 'containers' }}
+  # Service account mà container CHẠY BẰNG (phải được share thư mục Drive).
+  RUNTIME_SA: ${{ vars.RUNTIME_SERVICE_ACCOUNT }}
+  # Secret Manager chứa API_KEY — mount vào container qua --set-secrets.
+  API_KEY_SECRET: ${{ vars.API_KEY_SECRET_NAME || 'video-render-api-key' }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      # Không có ffmpeg thì tests/test_integration*.py tự skip (skipif
+      # shutil.which("ffmpeg") is None) — cài vào để chúng chạy thật.
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tests
+        # Test tự set API_KEY/WORK_DIR qua monkeypatch (tests/api/conftest.py),
+        # không cần secret nào.
+        run: pytest -q
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # bắt buộc cho Workload Identity Federation
+    steps:
+      - uses: actions/checkout@v4
+
+      # Xác thực keyless bằng Workload Identity Federation — không có key JSON
+      # nào nằm trong repo secrets. Cần tạo trước:
+      #   WIF_PROVIDER  = projects/<num>/locations/global/workloadIdentityPools/<pool>/providers/<provider>
+      #   DEPLOYER_SERVICE_ACCOUNT = SA dùng để deploy (khác RUNTIME_SA)
+      # SA deploy cần: roles/run.admin, roles/artifactregistry.writer,
+      # và roles/iam.serviceAccountUser TRÊN RUNTIME_SA (để actAs khi deploy).
+      - id: auth
+        name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.DEPLOYER_SERVICE_ACCOUNT }}
+          token_format: access_token
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Log in to Artifact Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGION }}-docker.pkg.dev
+          username: oauth2accesstoken
+          password: ${{ steps.auth.outputs.access_token }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Compute image tags
+        id: image
+        run: |
+          BASE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}/${SERVICE}"
+          echo "sha_tag=${BASE}:${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+          echo "latest_tag=${BASE}:latest" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ steps.image.outputs.sha_tag }}
+            ${{ steps.image.outputs.latest_tag }}
+          # Layer apt-get (ffmpeg + font) nặng và gần như không đổi -> cache lại
+          # để build sau chỉ mất thời gian ở lớp pip/COPY app.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Deploy bằng tag SHA chứ không phải :latest — Cloud Run ghim đúng digest
+      # đã build ở bước trên, và rollback chỉ là deploy lại một SHA cũ.
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy "${SERVICE}" \
+            --image="${{ steps.image.outputs.sha_tag }}" \
+            --region="${REGION}" \
+            --project="${PROJECT_ID}" \
+            --platform=managed \
+            --service-account="${RUNTIME_SA}" \
+            --execution-environment=gen2 \
+            --cpu=4 \
+            --memory=16Gi \
+            --cpu-boost \
+            --no-cpu-throttling \
+            --timeout=3600 \
+            --concurrency=20 \
+            --min-instances=1 \
+            --max-instances=1 \
+            --allow-unauthenticated \
+            --set-env-vars="WORK_DIR=/tmp/jobs,MAX_DOWNLOAD_MB=4096,MAX_FOLDER_VIDEOS=30,MAX_CONCURRENT_JOBS=1,JOB_TTL_SECONDS=3600,LOG_LEVEL=INFO" \
+            --set-secrets="API_KEY=${API_KEY_SECRET}:latest"
+
+      # /healthz không cần auth (SPEC §3.5) nên kiểm được ngay mà không cần key.
+      # Xác nhận luôn WORK_DIR đúng là /tmp/jobs — cảnh báo path-mangling trong
+      # scripts/deploy.sh không áp dụng ở runner Linux, nhưng vẫn nên tự mắt thấy.
+      - name: Smoke check
+        run: |
+          URL=$(gcloud run services describe "${SERVICE}" \
+            --region="${REGION}" --project="${PROJECT_ID}" --format='value(status.url)')
+          echo "Service URL: ${URL}"
+          curl --fail --silent --show-error --retry 5 --retry-delay 5 \
+            --retry-all-errors "${URL}/healthz"
+          echo
+          gcloud run services describe "${SERVICE}" \
+            --region="${REGION}" --project="${PROJECT_ID}" \
+            --format="yaml(spec.template.spec.containers[0].env)"
