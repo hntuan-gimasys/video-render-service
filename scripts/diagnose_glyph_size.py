@@ -25,9 +25,18 @@ import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from app.models import RenderOptions
-from app.overlay import plan_burn
-from tests.test_integration_overlay import bright_bbox, render_frame, write_srt
+# Chạy thẳng "python scripts/diagnose_glyph_size.py" thì sys.path[0] là thư mục
+# scripts/, không phải gốc repo -> "import app" chết. pytest không gặp lỗi này vì
+# nó tự cắm rootdir vào sys.path.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from app.models import RenderOptions  # noqa: E402
+from app.overlay import plan_burn  # noqa: E402
+from tests.test_integration_overlay import (  # noqa: E402
+    bright_bbox,
+    render_frame,
+    write_srt,
+)
 
 WIDTH, HEIGHT = 720, 1280
 SIZES = (50, 100, 200)
@@ -118,17 +127,32 @@ async def measure(workspace: Path, size: int, *, bold: bool) -> None:
         )
 
 
+async def _measure_quiet(workspace: Path, size: int, *, bold: bool) -> None:
+    """Một phép đo hỏng không được cuốn theo các phép đo còn lại.
+
+    Mỗi vòng CI rất đắt, nên thà in ra kết quả từng phần còn hơn mất sạch vì
+    một lần ffmpeg lỗi.
+    """
+    try:
+        await measure(workspace, size, bold=bold)
+    except Exception as exc:  # noqa: BLE001 - script chẩn đoán, in hết mọi lỗi
+        print(f"  font_size={size} bold={bold}: LỖI {type(exc).__name__}: {exc}")
+
+
 async def main() -> int:
     print("=== Font mà libass sẽ dùng ===")
-    report_font("Liberation Serif")
+    try:
+        report_font("Liberation Serif")
+    except Exception as exc:  # noqa: BLE001
+        print(f"  LỖI khi đọc font: {type(exc).__name__}: {exc}")
     print()
     print("=== Chiều cao chữ thật theo từng cỡ ===")
     with TemporaryDirectory() as tmp:
         workspace = Path(tmp)
         for size in SIZES:
-            await measure(workspace, size, bold=True)
+            await _measure_quiet(workspace, size, bold=True)
         # bold=False để tách ảnh hưởng của việc in đậm (mặc định SPEC là bold).
-        await measure(workspace, 100, bold=False)
+        await _measure_quiet(workspace, 100, bold=False)
     return 0
 
 
