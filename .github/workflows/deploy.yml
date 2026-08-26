@@ -41,10 +41,24 @@ jobs:
 
       # Không có ffmpeg thì tests/test_integration*.py tự skip (skipif
       # shutil.which("ffmpeg") is None) — cài vào để chúng chạy thật.
-      - name: Install ffmpeg
+      #
+      # PHẢI cài đúng bộ font như Dockerfile. tests/test_integration_overlay.py
+      # đo GLYPH THẬT trên frame ffmpeg dựng ra, và filter subtitles= trong test
+      # không truyền fontsdir -> libass hỏi fontconfig của hệ thống. Thiếu
+      # Liberation Serif (mặc định subtitle.font_name) thì fontconfig âm thầm
+      # thay bằng font khác có tỉ lệ cap-height khác, và các ngưỡng pixel trong
+      # test sai ngay dù code không đổi dòng nào.
+      - name: Install ffmpeg and fonts
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ffmpeg
+          sudo apt-get install -y --no-install-recommends \
+            ffmpeg \
+            fonts-dejavu-core \
+            fonts-liberation2 \
+            fontconfig
+          # Không tìm thấy font là hỏng test kiểu khó đoán -> dừng ngay tại đây.
+          fc-match "Liberation Serif" | tee /dev/stderr | grep -qi liberation
+          fc-match "Liberation Sans" | tee /dev/stderr | grep -qi liberation
 
       - name: Install dependencies
         run: pip install -r requirements.txt
