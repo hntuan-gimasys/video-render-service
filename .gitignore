@@ -1,0 +1,20 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+sa-key.json
+*.key.json
+tmp/
+out/
+.pytest_cache/
+.DS_Store
+fonts/*.ttf
+fonts/*.otf
+
+# Venv phu de test dung phien ban pin cua Docker image (Python 3.12)
+.venv312/
+# File mau do scripts/make_samples.sh sinh ra
+samples/
+out.mp4
+ket_qua.mp4
