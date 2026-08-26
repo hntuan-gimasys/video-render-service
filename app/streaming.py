@@ -18,6 +18,21 @@ from app.utils import CHUNK_SIZE, RangeNotSatisfiable
 
 _RANGE_HEADER: Final[re.Pattern[str]] = re.compile(r"^bytes=(\d*)-(\d*)$")
 
+# Cloud Run đổi response non-streaming lớn hơn 32 MiB thành "500 Internal Server
+# Error" ở Google Frontend, dù app đã trả 200. Đã đo trên service thật với output
+# 39.969.429 byte: plain GET -> 500 + log "Response size was too large", trong
+# khi uvicorn.access cùng lúc ghi 200; Range 33.000.001 byte -> 206 OK, Range
+# 33.554.431 byte -> 500. Tài liệu Cloud Run: "Maximum HTTP/1 response size:
+# 32 MiB per response. Limit applies if not using Transfer-Encoding: chunked or
+# streaming."
+#
+# Nên body lớn KHÔNG được gửi Content-Length: thiếu header đó, uvicorn tự dùng
+# Transfer-Encoding: chunked và response ra khỏi diện bị giới hạn. Đây là chỗ cố
+# tình lệch SPEC §3.3 ("Content-Length chính xác"): giữ đúng SPEC nghĩa là mọi
+# video trên 32 MiB đều không tải được. Ngưỡng đặt dưới mốc đo được một quãng vì
+# giới hạn của Cloud Run tính cả header chứ không chỉ body.
+_MAX_SIZED_RESPONSE: Final[int] = 32_000_000
+
 __all__ = ["parse_range", "stream_file", "build_download_response"]
 
 
@@ -95,9 +110,10 @@ def build_download_response(path: Path, total_size: int, range_header: str | Non
     length = end - start + 1
     headers = {
         "Content-Disposition": f'attachment; filename="{path.name}"',
-        "Content-Length": str(length),
         "Accept-Ranges": "bytes",
     }
+    if length <= _MAX_SIZED_RESPONSE:
+        headers["Content-Length"] = str(length)
     status_code = 200
     if start != 0 or length != total_size:
         headers["Content-Range"] = f"bytes {start}-{end}/{total_size}"

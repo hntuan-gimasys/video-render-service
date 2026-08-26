@@ -13,7 +13,7 @@ from app import prepare as prepare_mod
 from app import main as main_mod
 from app.ffmpeg_runner import ProbeResult
 from app.models import JobStatus
-from app.streaming import parse_range
+from app.streaming import build_download_response, parse_range
 from tests.helpers import AUTH, PROBE_OK
 from tests.helpers import api_client as _client
 from tests.helpers import job_form as _form
@@ -100,6 +100,32 @@ async def test_download_open_ended_range(fake_render: dict[str, Any]) -> None:
 )
 def test_parse_range(header: str | None, size: int, expected: tuple[int, int]) -> None:
     assert parse_range(header, size) == expected
+
+
+# --------------------------------------------------------------------------- #
+# Body lớn phải bỏ Content-Length để uvicorn gửi Transfer-Encoding: chunked,
+# nếu không Cloud Run đổi response thành 500 (xem chú thích trong
+# app/streaming.py). Gọi thẳng builder: StreamingResponse đọc file lười nên
+# total_size 40 MB không cần file thật trên đĩa.
+# --------------------------------------------------------------------------- #
+def test_large_response_omits_content_length() -> None:
+    response = build_download_response(Path("output.mp4"), 40_000_000, None)
+    assert response.status_code == 200
+    assert "content-length" not in response.headers
+    assert response.headers["accept-ranges"] == "bytes"
+
+
+def test_small_response_keeps_content_length() -> None:
+    response = build_download_response(Path("output.mp4"), 1_000, None)
+    assert response.headers["content-length"] == "1000"
+
+
+def test_large_range_slice_also_omits_content_length() -> None:
+    """Giới hạn 32 MiB áp cho cả 206, không chỉ 200."""
+    response = build_download_response(Path("output.mp4"), 40_000_000, "bytes=1-")
+    assert response.status_code == 206
+    assert response.headers["content-range"] == "bytes 1-39999999/40000000"
+    assert "content-length" not in response.headers
 
 
 # --------------------------------------------------------------------------- #
