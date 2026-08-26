@@ -280,7 +280,18 @@ def _mark_failed(
     job.error = JobError(code=exc.code, message=exc.message, detail=exc.detail)
     log.error(
         "Job thất bại",
-        extra={"error_code": exc.code, "error_message": exc.message},
+        # error_detail: nguyên nhân thật thường CHỈ nằm ở đây, vì nhiều mã lỗi
+        # dùng chung một message cho các nguyên nhân khác nhau — ví dụ
+        # DRIVE_DOWNLOAD_FAILED nói "Không đọc được thư mục Drive <id>" cho cả
+        # trường hợp sai quyền chia sẻ lẫn socket keep-alive đã chết (xem chú
+        # thích ở app/drive.py). Thiếu field này thì đọc log không lần ra được
+        # nguyên nhân, phải đi vòng qua GET /api/jobs/{id} và chỉ kịp làm khi job
+        # còn chưa hết JOB_TTL_SECONDS.
+        extra={
+            "error_code": exc.code,
+            "error_message": exc.message,
+            "error_detail": exc.detail,
+        },
         exc_info=exc_info,
     )
 

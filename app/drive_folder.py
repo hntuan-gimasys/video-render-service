@@ -14,7 +14,7 @@ import logging
 import re
 from typing import Any, Final
 
-from app.drive import DriveFileMeta, get_drive_service
+from app.drive import DriveFileMeta, call_drive, get_drive_service
 from app.utils import DriveDownloadFailed, InvalidDriveUrl
 
 logger = logging.getLogger(__name__)
@@ -129,7 +129,7 @@ async def list_folder_videos(folder_id: str) -> list[DriveFileMeta]:
     chia sẻ là ca hay gặp nhất), hoặc nếu thư mục không có video nào.
     """
     try:
-        files = await asyncio.to_thread(_list_blocking, folder_id)
+        files = await call_drive(_list_blocking, folder_id)
     except Exception as exc:  # noqa: BLE001 - gói mọi lỗi googleapiclient
         raise DriveDownloadFailed(
             f"Không đọc được thư mục Drive {folder_id}",

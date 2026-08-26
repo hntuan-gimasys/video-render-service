@@ -6,6 +6,7 @@ Tách khỏi tests/test_jobs.py để mỗi file test dưới 400 dòng.
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -233,3 +234,33 @@ async def test_run_job_cleans_both_subtitle_files(
     assert not (job.workspace / "subs.srt").exists()
     assert not raw.exists()
     assert job.output_path.exists()
+
+
+async def test_failure_log_carries_the_error_detail(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """detail phải có trong log, không chỉ trong response của GET /api/jobs/{id}.
+
+    Nhiều mã lỗi dùng chung một message nên message một mình không đủ để chẩn
+    đoán, mà record trong store thì mất sau JOB_TTL_SECONDS.
+    """
+
+    async def _boom(*_args: Any, **_kwargs: Any) -> None:
+        raise DriveDownloadFailed(
+            "Không đọc được thư mục Drive abc",
+            detail="BrokenPipeError: [Errno 32] Broken pipe",
+        )
+
+    monkeypatch.setattr(jobs_mod, "prepare_inputs", _boom)
+    store = JobStore()
+    job = await store.create(_make_job(settings))
+
+    with caplog.at_level(logging.ERROR, logger="app.jobs"):
+        await run_job("job1", store, settings)
+
+    assert job.status is JobStatus.FAILED
+    failures = [r for r in caplog.records if r.message == "Job thất bại"]
+    assert failures, "không thấy log lỗi nào"
+    assert getattr(failures[-1], "error_detail", None) == (
+        "BrokenPipeError: [Errno 32] Broken pipe"
+    )

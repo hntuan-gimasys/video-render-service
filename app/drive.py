@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import ssl
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import lru_cache
@@ -46,6 +47,7 @@ __all__ = [
     "DriveUploadResult",
     "parse_drive_id",
     "get_drive_service",
+    "call_drive",
     "download_file",
     "upload_file",
 ]
@@ -98,6 +100,53 @@ def get_drive_service() -> Any:
     credentials, _project = google.auth.default(scopes=list(DRIVE_SCOPES))
     # cache_discovery=False: tránh ghi cache lên đĩa read-only của container.
     return build("drive", "v3", credentials=credentials, cache_discovery=False)
+
+
+# Instance Cloud Run sống rất lâu (--min-instances=1 + --no-cpu-throttling) nên
+# client cache ở get_drive_service giữ đúng MỘT socket keep-alive suốt cả process.
+# Google đóng socket đó sau vài chục phút không dùng, và lần ghi kế tiếp chết ngay
+# bằng BrokenPipeError — đã gặp thật trên service: job 09:26 chạy xong, job 09:56
+# fail sau 27 ms với "BrokenPipeError: [Errno 32] Broken pipe", cùng thư mục Drive
+# và cùng revision.
+#
+# Connection chết đó nằm lại trong pool nên instance bị nhiễm vĩnh viễn, không tự
+# khỏi: job kế tiếp lúc 10:03 fail sau 6,6 ms, lần này ra "SSLError: [SSL:
+# UNEXPECTED_EOF_WHILE_READING]" — cùng một socket chết, khác triệu chứng.
+#
+# num_retries của googleapiclient KHÔNG chữa được ca này: httplib2 raise EPIPE
+# trong _conn_request mà không conn.close(), còn Http.request chỉ lấy connection
+# từ self.connections và không có nhánh nào loại bỏ connection hỏng -> conn.sock
+# vẫn khác None nên mọi lần retry dùng lại đúng socket đã chết. (Đường stale hay
+# gặp hơn — server đóng, getresponse() ra BadStatusLine — thì httplib2 tự close +
+# connect lại và hồi phục, nên chỉ nhánh ghi-lỗi này mới rò ra ngoài.)
+#
+# Nên cách duy nhất chắc chắn là bỏ client đang cache: dựng lại đồng nghĩa có
+# httplib2.Http mới với pool connection rỗng.
+_TRANSPORT_ERRORS: Final[tuple[type[BaseException], ...]] = (
+    # BrokenPipeError/ConnectionResetError/RemoteDisconnected đều là ConnectionError.
+    ConnectionError,
+    # SSLError KHÔNG thuộc ConnectionError nên phải kể riêng, nếu không triệu
+    # chứng thứ hai đo được ở trên sẽ lọt qua retry.
+    ssl.SSLError,
+)
+
+
+async def call_drive(func: Callable[..., Any], *args: Any) -> Any:
+    """Chạy một call blocking của Drive trong thread, thử lại nếu socket đã chết.
+
+    Chỉ thử lại đúng một lần và chỉ với lỗi tầng transport: mọi lỗi khác (403 sai
+    quyền chia sẻ, 404 sai id, file quá lớn...) phải nổi lên ngay chứ không được
+    che bằng retry.
+    """
+    try:
+        return await asyncio.to_thread(func, *args)
+    except _TRANSPORT_ERRORS as exc:
+        logger.warning(
+            "Kết nối Drive đã chết, dựng lại client rồi thử lại",
+            extra={"drive_transport_error": _short(exc)},
+        )
+        get_drive_service.cache_clear()
+        return await asyncio.to_thread(func, *args)
 
 
 def _get_metadata(file_id: str) -> DriveFileMeta:
@@ -153,7 +202,7 @@ async def download_file(
     Kiểm tra ``size`` trước khi tải để không nạp đầy /tmp (là RAM) rồi mới lỗi.
     """
     try:
-        meta = await asyncio.to_thread(_get_metadata, file_id)
+        meta = await call_drive(_get_metadata, file_id)
     except Exception as exc:  # noqa: BLE001 - gói mọi lỗi googleapiclient
         raise DriveDownloadFailed(
             f"Không đọc được metadata file Drive {file_id}",
@@ -172,7 +221,7 @@ async def download_file(
         extra={"drive_file_id": file_id, "size_bytes": meta.size_bytes, "drive_name": meta.name},
     )
     try:
-        await asyncio.to_thread(_download_blocking, file_id, dest, on_progress)
+        await call_drive(_download_blocking, file_id, dest, on_progress)
     except Exception as exc:  # noqa: BLE001
         # Xoá file tải dở, /tmp là RAM nên không được để rác lại.
         await asyncio.to_thread(_unlink_quiet, dest)
@@ -221,6 +270,10 @@ async def upload_file(
         # "filename" cũng là thuộc tính có sẵn của LogRecord, tương tự "name".
         extra={"drive_folder_id": folder_id, "upload_filename": src.name},
     )
+    # Cố tình KHÔNG dùng call_drive ở đây: thử lại một upload resumable đã đi được
+    # một phần có thể để lại hai file trên Drive. Mà socket chết vì nằm im chỉ đập
+    # vào call Drive ĐẦU TIÊN của job (quét thư mục); tới lúc upload thì kết nối
+    # vừa được dùng liên tục nên không còn nguy cơ đó.
     try:
         return await asyncio.to_thread(_upload_blocking, src, folder_id, mime_type)
     except Exception as exc:  # noqa: BLE001

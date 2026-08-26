@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import ssl
 from pathlib import Path
 from typing import Any
 
@@ -345,3 +346,112 @@ def test_no_extra_key_collides_with_logrecord_attrs() -> None:
                 offenders.append(f"{path}:{line_no} -> {bad}")
 
     assert not offenders, "extra= dùng key đụng LogRecord:\n" + "\n".join(offenders)
+
+
+# --------------------------------------------------------------------------- #
+# call_drive — socket keep-alive chết vì instance nằm im quá lâu
+# --------------------------------------------------------------------------- #
+class _FakeCachedService:
+    """Đứng thay get_drive_service: gọi được, và đếm số lần bị cache_clear()."""
+
+    def __init__(self) -> None:
+        self.builds = 0
+        self.cleared = 0
+
+    def __call__(self) -> str:
+        self.builds += 1
+        return "service"
+
+    def cache_clear(self) -> None:
+        self.cleared += 1
+
+
+async def test_call_drive_rebuilds_client_after_a_dead_socket(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _FakeCachedService()
+    monkeypatch.setattr(drive, "get_drive_service", fake)
+    calls: list[int] = []
+
+    def _flaky() -> str:
+        calls.append(1)
+        if len(calls) == 1:
+            raise BrokenPipeError(32, "Broken pipe")
+        return "ok"
+
+    assert await drive.call_drive(_flaky) == "ok"
+    assert len(calls) == 2
+    assert fake.cleared == 1, "phải bỏ client đang cache trước khi thử lại"
+
+
+async def test_call_drive_retries_a_dead_tls_socket(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Socket TLS chết giữa đường ra SSLEOFError, không thuộc ConnectionError.
+    fake = _FakeCachedService()
+    monkeypatch.setattr(drive, "get_drive_service", fake)
+    calls: list[int] = []
+
+    def _flaky() -> str:
+        calls.append(1)
+        if len(calls) == 1:
+            raise ssl.SSLEOFError("EOF occurred in violation of protocol")
+        return "ok"
+
+    assert await drive.call_drive(_flaky) == "ok"
+    assert fake.cleared == 1
+
+
+async def test_call_drive_does_not_retry_a_permission_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _FakeCachedService()
+    monkeypatch.setattr(drive, "get_drive_service", fake)
+    calls: list[int] = []
+
+    def _forbidden() -> str:
+        calls.append(1)
+        raise RuntimeError("403 Forbidden")
+
+    with pytest.raises(RuntimeError):
+        await drive.call_drive(_forbidden)
+    assert len(calls) == 1, "lỗi quyền không được che bằng retry"
+    assert fake.cleared == 0
+
+
+async def test_call_drive_gives_up_after_one_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _FakeCachedService()
+    monkeypatch.setattr(drive, "get_drive_service", fake)
+    calls: list[int] = []
+
+    def _always_dead() -> str:
+        calls.append(1)
+        raise BrokenPipeError(32, "Broken pipe")
+
+    with pytest.raises(BrokenPipeError):
+        await drive.call_drive(_always_dead)
+    assert len(calls) == 2, "chỉ thử lại đúng một lần"
+
+
+async def test_upload_does_not_retry_a_dead_socket(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Upload cố tình không đi qua call_drive.
+
+    Thử lại một upload resumable đã đi được một phần có thể để lại hai file trên
+    Drive; mà socket chết vì nằm im chỉ đập vào call Drive đầu tiên của job.
+    """
+    src = tmp_path / "out.mp4"
+    src.write_bytes(b"x")
+    calls: list[int] = []
+
+    def _dead(*_args: Any, **_kwargs: Any) -> Any:
+        calls.append(1)
+        raise BrokenPipeError(32, "Broken pipe")
+
+    monkeypatch.setattr(drive, "_upload_blocking", _dead)
+    with pytest.raises(DriveUploadFailed):
+        await upload_file(src)
+    assert len(calls) == 1

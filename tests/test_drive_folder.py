@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 
+from app.drive import DriveFileMeta
 from app.drive_folder import is_video, list_folder_videos, parse_folder_id
 from app.utils import DriveDownloadFailed, InvalidDriveUrl
 
@@ -198,3 +199,29 @@ async def test_bad_size_field_does_not_crash(monkeypatch: pytest.MonkeyPatch) ->
         [{"files": [{"id": "1", "name": "a.mp4", "mimeType": "video/mp4"}]}],
     )
     assert (await list_folder_videos(FOLDER_ID))[0].size_bytes == 0
+
+
+async def test_dead_socket_on_the_first_scan_is_retried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Job đầu tiên sau khi instance nằm im: socket keep-alive đã bị Google đóng.
+
+    Đây là ca thật đã gặp trên Cloud Run — job trước chạy xong, 30 phút sau job
+    kế tiếp fail ngay sau 27 ms với BrokenPipeError.
+    """
+    from app import drive_folder
+
+    calls: list[int] = []
+
+    def _flaky(_folder_id: str) -> Any:
+        calls.append(1)
+        if len(calls) == 1:
+            raise BrokenPipeError(32, "Broken pipe")
+        return [
+            DriveFileMeta(file_id="1", name="a.mp4", size_bytes=1, mime_type="video/mp4")
+        ]
+
+    monkeypatch.setattr(drive_folder, "_list_blocking", _flaky)
+    files = await list_folder_videos(FOLDER_ID)
+    assert len(calls) == 2
+    assert [item.name for item in files] == ["a.mp4"]
