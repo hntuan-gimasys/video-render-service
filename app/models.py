@@ -184,7 +184,9 @@ class ClipSpec(BaseModel):
       sinh ra: nó chỉ biết tên file chứ không biết thứ tự ta nhận được.
 
     ``source_video`` là tên gọi khác của ``source``, để nhận thẳng kịch bản dạng
-    ``video_edit_script`` mà không phải đổi tên khoá.
+    ``video_edit_script`` mà không phải đổi tên khoá. Tương tự, ``start_seconds``
+    và ``end_seconds`` là mốc dạng số giây của cùng pipeline đó — có mặt thì
+    THẮNG ``start``/``end``, xem :meth:`_accept_pipeline_aliases`.
 
     Cố tình KHÔNG kế thừa ``_Strict`` (khác mọi options khác trong file này):
     kịch bản dựng do một pipeline AI khác sinh ra thường đính kèm ghi chú riêng
@@ -206,14 +208,35 @@ class ClipSpec(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _accept_source_video_alias(cls, data: object) -> object:
-        # extra="forbid" nên phải BỎ hẳn khoá cũ, không chỉ copy sang tên mới.
-        if isinstance(data, dict) and "source_video" in data:
-            renamed = dict(data)
-            alias = renamed.pop("source_video")
-            renamed.setdefault("source", alias)
-            return renamed
-        return data
+    def _accept_pipeline_aliases(cls, data: object) -> object:
+        """Đổi tên các khoá mà pipeline sinh kịch bản dùng sang tên field ở đây.
+
+        Hai nhóm khoá xử lý NGƯỢC nhau, cố ý:
+
+        * ``source_video`` NHƯỜNG cho ``source`` nếu có cả hai — chúng là hai
+          cách gọi cùng một thứ, ai khai rõ ``source`` thì tôn trọng.
+        * ``start_seconds``/``end_seconds`` GHI ĐÈ ``start``/``end``. Cùng một
+          pipeline phát ra cả hai, trong đó ``start``/``end`` là bản ĐÃ LÀM TRÒN
+          về giây chẵn cho người đọc dễ nhìn — đã gặp thật ``"start": "00:00"``
+          đi kèm ``"start_seconds": 0.5``, và ``"start": "00:23"`` kèm
+          ``"start_seconds": 23.61``. Nhường cho ``start``/``end`` là mất sạch
+          phần thập phân, tức cắt lệch tới hơn nửa giây so với ý đồ dựng.
+        """
+        if not isinstance(data, dict):
+            return data
+        renamed = dict(data)
+        # Bỏ hẳn khoá cũ chứ không chỉ copy sang tên mới: giữ lại thì nếu sau này
+        # siết về extra="forbid" sẽ thành lỗi ngay.
+        if "source_video" in renamed:
+            renamed.setdefault("source", renamed.pop("source_video"))
+        for precise, field in (("start_seconds", "start"), ("end_seconds", "end")):
+            if precise not in renamed:
+                continue
+            value = renamed.pop(precise)
+            # null nghĩa là pipeline không tính được mốc chính xác -> giữ bản thô.
+            if value is not None:
+                renamed[field] = value
+        return renamed
 
     @field_validator("source", mode="before")
     @classmethod

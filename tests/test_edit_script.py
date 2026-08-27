@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 
 import pytest
+from pydantic import ValidationError
 
 from app.clips import (
     SourceVideo,
@@ -227,3 +228,94 @@ def test_clips_field_picks_the_syntax_from_the_content() -> None:
     specs, srt = parse_clips_field("1 0-2; 2 0-3")
     assert [spec.source for spec in specs] == [1, 2]
     assert srt is None
+
+
+# --------------------------------------------------------------------------- #
+# start_seconds/end_seconds: mốc chính xác của pipeline, thắng start/end
+# --------------------------------------------------------------------------- #
+def test_start_seconds_wins_over_the_rounded_start() -> None:
+    """Pipeline phát ra cả hai: start/end làm tròn giây chẵn, *_seconds chính xác.
+
+    Lấy bản làm tròn là cắt lệch tới hơn nửa giây so với ý đồ dựng.
+    """
+    spec = ClipSpec.model_validate(
+        {
+            "source_video": WAKE,
+            "start": "00:23",
+            "end": "00:26",
+            "start_seconds": 23.61,
+            "end_seconds": 26.52,
+            "vibe_note": "POINT 1",
+        }
+    )
+    assert (spec.start, spec.end) == (23.61, 26.52)
+
+
+def test_seconds_fields_work_without_start_and_end() -> None:
+    spec = ClipSpec.model_validate(
+        {"source_video": WAKE, "start_seconds": 0.5, "end_seconds": 2.5}
+    )
+    assert (spec.start, spec.end) == (0.5, 2.5)
+
+
+def test_null_seconds_falls_back_to_start_and_end() -> None:
+    # Pipeline không tính được mốc chính xác thì vẫn phải dùng được bản thô.
+    spec = ClipSpec.model_validate(
+        {
+            "source_video": WAKE,
+            "start": "00:04",
+            "end": "00:06",
+            "start_seconds": None,
+            "end_seconds": None,
+        }
+    )
+    assert (spec.start, spec.end) == (4.0, 6.0)
+
+
+def test_seconds_fields_accept_string_form_too() -> None:
+    spec = ClipSpec.model_validate(
+        {"source_video": WAKE, "start_seconds": "00:04.25", "end_seconds": "6.5"}
+    )
+    assert (spec.start, spec.end) == (4.25, 6.5)
+
+
+def test_bad_seconds_field_is_reported_not_ignored() -> None:
+    with pytest.raises(ValidationError):
+        ClipSpec.model_validate(
+            {"source_video": WAKE, "start_seconds": "khong-phai-so", "end": "00:06"}
+        )
+
+
+def test_source_video_still_defers_to_an_explicit_source() -> None:
+    # Đối xứng NGƯỢC với *_seconds, và phải giữ nguyên hành vi cũ.
+    spec = ClipSpec.model_validate(
+        {"source": 2, "source_video": WAKE, "start": 0, "end": 1}
+    )
+    assert spec.source == 2
+
+
+def test_full_pipeline_payload_with_seconds_fields() -> None:
+    """Dán nguyên mảng của pipeline, gồm cả start/end thô lẫn *_seconds."""
+    payload = json.dumps(
+        [
+            {
+                "source_video": WAKE,
+                "start": "00:00",
+                "end": "00:02",
+                "start_seconds": 0.5,
+                "end_seconds": 2.5,
+                "vibe_note": "HOOK",
+            },
+            {
+                "source_video": FLAVORS,
+                "start": "00:17",
+                "end": "00:22",
+                "start_seconds": 17.5,
+                "end_seconds": 22.5,
+                "vibe_note": "CTA",
+            },
+        ]
+    )
+    specs, srt = parse_clips_field(payload)
+    assert srt is None
+    assert [(s.start, s.end) for s in specs] == [(0.5, 2.5), (17.5, 22.5)]
