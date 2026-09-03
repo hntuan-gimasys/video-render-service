@@ -46,6 +46,7 @@ __all__ = [
     "DriveFileMeta",
     "DriveUploadResult",
     "parse_drive_id",
+    "drive_direct_url",
     "get_drive_service",
     "call_drive",
     "download_file",
@@ -86,6 +87,21 @@ def parse_drive_id(url: str) -> str:
             return match.group(1)
 
     raise InvalidDriveUrl(f"Không nhận diện được file_id từ: {candidate[:200]}")
+
+
+def drive_direct_url(file_id: str) -> str:
+    """Link lấy thẳng bytes của một file Drive.
+
+    Khác ``webViewLink`` (trang xem của Drive, trả HTML): dạng ``uc?export=
+    download`` trả đúng nội dung file, nên nó mới là thứ thay được cho endpoint
+    ``/download`` cũ mà bên gọi không phải sửa gì.
+
+    Link này KHÔNG mở công khai: người/máy gọi vẫn phải có quyền đọc file. File
+    do service account tạo trong thư mục đích nên nó thừa hưởng quyền của thư
+    mục đó — ai xem được thư mục thì tải được, còn một downstream không mang
+    credential Google sẽ nhận trang đăng nhập chứ không phải video.
+    """
+    return f"https://drive.google.com/uc?id={file_id}&export=download"
 
 
 @lru_cache(maxsize=1)
@@ -270,12 +286,20 @@ async def upload_file(
         # "filename" cũng là thuộc tính có sẵn của LogRecord, tương tự "name".
         extra={"drive_folder_id": folder_id, "upload_filename": src.name},
     )
-    # Cố tình KHÔNG dùng call_drive ở đây: thử lại một upload resumable đã đi được
-    # một phần có thể để lại hai file trên Drive. Mà socket chết vì nằm im chỉ đập
-    # vào call Drive ĐẦU TIÊN của job (quét thư mục); tới lúc upload thì kết nối
-    # vừa được dùng liên tục nên không còn nguy cơ đó.
+    # Upload PHẢI đi qua call_drive. Từng để nó ngoài với lý do "socket chết chỉ
+    # đập vào call Drive đầu tiên của job, tới lúc upload thì kết nối vừa dùng
+    # liên tục" — lý do đó SAI, đo được trên production: job 1756ba62296e tải
+    # video nguồn xong lúc 10:16:30.695 không cần retry lần nào, rồi upload chết
+    # lúc 10:16:33.172 bằng "BrokenPipeError: [Errno 32] Broken pipe", chỉ 3 giây
+    # sau. Lần ghi đầu của resumable upload vào một keep-alive mà Google vừa đóng
+    # là đủ để EPIPE, không cần nằm im lâu.
+    #
+    # Đánh đổi còn lại: nếu lần đầu đã commit chunk cuối mà response bị mất thì
+    # lần thử lại tạo thêm một file nữa trên Drive. Cửa sổ đó rất hẹp (resumable
+    # upload chỉ hiện file khi hoàn tất), và một file trùng vẫn nhẹ hơn nhiều so
+    # với việc bỏ trắng cả lượt render đã xong.
     try:
-        return await asyncio.to_thread(_upload_blocking, src, folder_id, mime_type)
+        return await call_drive(_upload_blocking, src, folder_id, mime_type)
     except Exception as exc:  # noqa: BLE001
         raise DriveUploadFailed(
             f"Upload {src.name} lên Drive thất bại", detail=_short(exc)

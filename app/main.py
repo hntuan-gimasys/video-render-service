@@ -25,6 +25,7 @@ from app.intake import (
     clean,
     file_size,
     parse_options,
+    resolve_drive_output_folder,
     save_sources,
 )
 from app.jobs import Job, JobStore, get_semaphore, janitor_loop, run_job
@@ -245,6 +246,10 @@ async def create_job(
     parse_folder_id(folder_url)
     if clean(music_url):
         parse_drive_id(music_url or "")
+    # Cùng lý do: bật upload mà không có thư mục đích thì chắc chắn chết ở bước
+    # cuối, sau khi đã tải và render xong. Chặn trong request để client biết
+    # ngay chứ không mất một lượt render.
+    resolve_drive_output_folder(render_options, settings)
 
     job_id = new_job_id()
     log = bind_job(logger, job_id)

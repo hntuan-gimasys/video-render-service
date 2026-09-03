@@ -435,14 +435,39 @@ async def test_call_drive_gives_up_after_one_retry(
     assert len(calls) == 2, "chỉ thử lại đúng một lần"
 
 
-async def test_upload_does_not_retry_a_dead_socket(
+async def test_upload_retries_a_dead_socket(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Upload cố tình không đi qua call_drive.
+    """Upload cũng phải retry — đo được trên production, không phải phòng xa.
 
-    Thử lại một upload resumable đã đi được một phần có thể để lại hai file trên
-    Drive; mà socket chết vì nằm im chỉ đập vào call Drive đầu tiên của job.
+    Job 1756ba62296e tải nguồn xong lúc 10:16:30.695 mà không cần retry lần nào,
+    rồi upload chết lúc 10:16:33.172 bằng BrokenPipeError, chỉ 3 giây sau. Lần ghi
+    đầu của resumable upload vào keep-alive Google vừa đóng là đủ để EPIPE.
     """
+    src = tmp_path / "out.mp4"
+    src.write_bytes(b"x")
+    calls: list[int] = []
+
+    class _Result:
+        file_id = "id-1"
+        name = "out.mp4"
+        web_view_link = "https://drive.google.com/file/d/id-1/view"
+
+    def _flaky(*_args: Any, **_kwargs: Any) -> Any:
+        calls.append(1)
+        if len(calls) == 1:
+            raise BrokenPipeError(32, "Broken pipe")
+        return _Result()
+
+    monkeypatch.setattr(drive, "_upload_blocking", _flaky)
+    result = await upload_file(src)
+    assert len(calls) == 2
+    assert result.file_id == "id-1"
+
+
+async def test_upload_gives_up_after_one_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     src = tmp_path / "out.mp4"
     src.write_bytes(b"x")
     calls: list[int] = []
@@ -454,4 +479,4 @@ async def test_upload_does_not_retry_a_dead_socket(
     monkeypatch.setattr(drive, "_upload_blocking", _dead)
     with pytest.raises(DriveUploadFailed):
         await upload_file(src)
-    assert len(calls) == 1
+    assert len(calls) == 2

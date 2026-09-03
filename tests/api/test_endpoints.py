@@ -95,6 +95,25 @@ async def test_invalid_options_returns_422(options: str) -> None:
     assert response.json()["error"]["code"] == "INVALID_OPTIONS"
 
 
+async def test_upload_to_drive_without_a_folder_returns_422_before_rendering() -> None:
+    """Bật upload mà không có thư mục đích thì phải chết NGAY trong request.
+
+    Nếu để job nhận 202 thì nó tải video, render 40 giây rồi mới chết ở bước
+    cuối — mất trắng một lượt render cho một lỗi biết trước từ đầu.
+    """
+    async with await _client() as client:
+        response = await client.post(
+            "/api/jobs",
+            headers=AUTH,
+            data=_form(options='{"delivery":{"upload_to_drive":true}}'),
+        )
+        assert response.status_code == 422
+        assert response.json()["error"]["code"] == "INVALID_OPTIONS"
+        assert "Shared Drive" in (response.json()["error"]["detail"] or "")
+        # Và không được để lại job nào trong store.
+        assert await main_mod.app.state.store.count_active() == 0
+
+
 async def test_malformed_options_json_returns_422() -> None:
     async with await _client() as client:
         response = await client.post("/api/jobs", headers=AUTH, data=_form(options="{not json"))

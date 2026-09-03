@@ -78,7 +78,10 @@ else
   echo "==> Dùng service account có sẵn: ${SA_EMAIL}"
 fi
 
-BASE_ENV_VARS="WORK_DIR=/tmp/jobs,MAX_DOWNLOAD_MB=4096,MAX_FOLDER_VIDEOS=30,MAX_CONCURRENT_JOBS=1,JOB_TTL_SECONDS=3600,LOG_LEVEL=INFO"
+# MAX_DOWNLOAD_MB buộc đi cùng --memory ở lệnh deploy — xem chú thích tại đó.
+# DRIVE_OUTPUT_FOLDER_ID: thư mục Shared Drive nhận output; rỗng thì request phải
+# tự khai delivery.drive_folder_id.
+BASE_ENV_VARS="WORK_DIR=/tmp/jobs,MAX_DOWNLOAD_MB=1024,MAX_FOLDER_VIDEOS=30,MAX_CONCURRENT_JOBS=1,JOB_TTL_SECONDS=3600,LOG_LEVEL=INFO,DRIVE_OUTPUT_FOLDER_ID=${DRIVE_OUTPUT_FOLDER_ID:-}"
 SECRET_ACCESS_GRANTED=1
 
 if [ "${USE_SECRET_MANAGER}" != "1" ]; then
@@ -146,6 +149,31 @@ if [ "${USE_SECRET_MANAGER}" != "1" ] \
   gcloud run services update "${SERVICE}" --region="${REGION}" --clear-secrets || true
 fi
 
+# Chi phi: --min-instances=0 vi do tren log 24h that la 12 job, tong 660 giay
+# lam viec tren 86.400 giay bi tinh tien -> 0,76% duoc dung. Voi
+# --no-cpu-throttling thi Cloud Run tinh tien theo TOAN BO thoi gian song cua
+# instance chu khong theo request, nen minScale=1 la tra tien 24/7 cho mot
+# instance ngoi khong.
+#
+# Danh doi PHAI biet: job state va output.mp4 nam trong RAM cua process (khong
+# DB, khong GCS). Instance bi thu la mat ca record lan file, nen
+# JOB_TTL_SECONDS=3600 khong con la loi hua giu duoc - link /download chi song
+# toi khi Cloud Run thu instance sau luc ranh. Cach dung dung kem cau hinh nay
+# la bat delivery.upload_to_drive de lay file ra khoi RAM ngay roi tich hop
+# bang link Drive. Ai van can link /download song du mot gio thi phai quay lai
+# --min-instances=1 va tra tien cho no.
+#
+# Vi sao KHONG ha --cpu: encode la CPU-bound nen 2 vCPU chi chay lau gap doi
+# voi dung cung so vCPU-giay -> gan nhu khong tiet kiem, ma cold start va moi
+# job deu cham di. Nguoc lai memory tinh theo GiB-giay bat ke co dung hay
+# khong, nen ha memory moi la tiet kiem that.
+#
+# --memory=4Gi BUOC di cung MAX_DOWNLOAD_MB=1024: /tmp la tmpfs (RAM) va trong
+# luc render workspace giu dong thoi video nguon + merged.mp4 + output.mp4
+# (_cleanup_inputs chi chay o cuoi). Tran cu 4096 MB chinh la ly do memory tung
+# phai la 16Gi. Sua mot trong hai so nay thi phai sua ca hai. Do that tren job
+# nang nhat: 85,7 MiB nguon + 19,3 MiB merged + 13,2 MiB output = ~118 MiB dinh,
+# tuc tran 1024 MB van con du gap nhieu lan.
 echo "==> Deploy"
 gcloud run deploy "${SERVICE}" \
   --image="${IMAGE}" \
@@ -154,12 +182,12 @@ gcloud run deploy "${SERVICE}" \
   --service-account="${SA_EMAIL}" \
   --execution-environment=gen2 \
   --cpu=4 \
-  --memory=16Gi \
+  --memory=4Gi \
   --cpu-boost \
   --no-cpu-throttling \
   --timeout=3600 \
   --concurrency=20 \
-  --min-instances=1 \
+  --min-instances=0 \
   --max-instances=1 \
   --allow-unauthenticated \
   "${DEPLOY_ENV_FLAGS[@]}"

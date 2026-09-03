@@ -36,6 +36,11 @@ class Settings(BaseSettings):
         default=30, alias="MAX_FOLDER_VIDEOS"
     )
     job_ttl_seconds: Annotated[int, Field(ge=1)] = Field(default=3600, alias="JOB_TTL_SECONDS")
+    # Thư mục Drive mặc định nhận output khi delivery.upload_to_drive=true, để
+    # khỏi phải gửi lại id trong từng request. Rỗng = bắt buộc khai
+    # delivery.drive_folder_id trong request. PHẢI là thư mục trên Shared Drive:
+    # xem intake.resolve_drive_output_folder.
+    drive_output_folder_id: str = Field(default="", alias="DRIVE_OUTPUT_FOLDER_ID")
     ffmpeg_threads: Annotated[int, Field(ge=0)] = Field(default=0, alias="FFMPEG_THREADS")
     fonts_dir: str = Field(default="/app/fonts", alias="FONTS_DIR")
     google_application_credentials: str = Field(

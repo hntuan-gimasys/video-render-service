@@ -144,6 +144,13 @@ async def test_run_job_uploads_to_drive(
     assert job.output is not None
     assert job.output.drive_file_id == "drive-id-1"
     assert job.output.drive_view_url == "https://drive.google.com/file/d/drive-id-1/view"
+    # download_url bị THAY HẲN bằng link Drive lấy thẳng bytes, để bước sau đọc
+    # đúng field cũ là có link video mới mà không phải sửa gì.
+    direct = "https://drive.google.com/uc?id=drive-id-1&export=download"
+    assert job.output.download_url == direct
+    assert job.output.drive_download_url == direct
+    # Và bản trong /tmp (là RAM) được xoá ngay, không giữ tới hết JOB_TTL_SECONDS.
+    assert not job.output_path.exists()
 
 
 # --------------------------------------------------------------------------- #

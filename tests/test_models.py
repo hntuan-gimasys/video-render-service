@@ -59,7 +59,13 @@ def test_empty_options_is_valid_and_matches_spec_defaults() -> None:
     assert opts.output.faststart is True
     assert opts.output.copy_video_if_possible is True
 
-    assert opts.delivery.upload_to_drive is False
+    # None = tự quyết, cùng mẫu với music.original_volume ở trên: có
+    # DRIVE_OUTPUT_FOLDER_ID lúc deploy thì đẩy output lên Drive, không có thì
+    # thôi. Cố tình lệch bảng SPEC §7 (ghi mặc định là false) — mặc định cứng
+    # false buộc MỌI request phải nhắc lại cấu hình của cả service, mà bên gọi
+    # thì không nên biết service được deploy thế nào. Quan trọng: deploy không
+    # đặt env đó thì hành vi y như trước, nên chỗ lệch này không tự kích hoạt.
+    assert opts.delivery.upload_to_drive is None
     assert opts.delivery.drive_folder_id is None
 
 

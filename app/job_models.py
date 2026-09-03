@@ -46,12 +46,25 @@ _TERMINAL_STATUSES: Final[frozenset[JobStatus]] = frozenset(
 
 
 class JobOutput(BaseModel):
+    """Kết quả của job.
+
+    ``download_url`` là link ĐỂ LẤY FILE, và nội dung của nó đổi theo cách giao
+    hàng: không upload thì là endpoint ``/api/jobs/{id}/download`` của service,
+    còn upload lên Drive thành công thì là link tải trực tiếp từ Drive. Cố ý
+    dùng lại đúng field này thay vì thêm field mới, để bước sau không phải sửa
+    gì khi bật upload — đây là chỗ lệch SPEC §3.2, nơi ``download_url`` được mô
+    tả là endpoint nội bộ.
+    """
+
     filename: str
     size_bytes: int
     duration_seconds: float | None = None
     download_url: str
     drive_file_id: str | None = None
+    # Link mở trang xem của Drive (cho người bấm), khác download_url là link lấy
+    # thẳng bytes (cho máy gọi).
     drive_view_url: str | None = None
+    drive_download_url: str | None = None
 
 
 class JobError(BaseModel):

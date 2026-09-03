@@ -349,7 +349,15 @@ class OutputOptions(_Strict):
 
 
 class DeliveryOptions(_Strict):
-    upload_to_drive: bool = False
+    # None = CHƯA KHAI -> bật upload nếu deploy có đặt DRIVE_OUTPUT_FOLDER_ID,
+    # tắt nếu không. Nhờ vậy bên gọi không phải gửi lại option này trong từng
+    # request chỉ để bảo "vẫn đẩy lên Drive như cấu hình". Khai rõ ``true``/
+    # ``false`` thì giá trị đó thắng, nên client cũ khai false vẫn giữ nguyên
+    # hành vi. Quy tắc chốt ở intake.resolve_drive_output_folder.
+    #
+    # Cố tình lệch SPEC §7 (bảng ghi mặc định là ``false``): mặc định cứng ở đây
+    # nghĩa là mỗi request đều phải nhắc lại cấu hình của cả service.
+    upload_to_drive: bool | None = None
     drive_folder_id: str | None = None
 
 

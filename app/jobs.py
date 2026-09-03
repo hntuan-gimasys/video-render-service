@@ -8,7 +8,8 @@ import logging
 from collections import deque
 
 from app.config import Settings
-from app.drive import upload_file
+from app.drive import drive_direct_url, upload_file
+from app.intake import resolve_drive_output_folder
 from app.ffmpeg_runner import (
     SUBS_ASS_NAME,
     SUBS_SRT_NAME,
@@ -98,7 +99,7 @@ async def run_job(
         await check_tmp_space(job, settings, log)
         async with gate:
             await _render_stage(job, settings, inputs, probe_result, log)
-        await _finalize(job, probe_result, log)
+        await _finalize(job, settings, probe_result, log)
     except asyncio.CancelledError:
         job.status = JobStatus.CANCELLED
         job.finished_at = utcnow()
@@ -235,6 +236,7 @@ async def _plan_subtitles(
 
 async def _finalize(
     job: Job,
+    settings: Settings,
     probe_result: ProbeResult,
     log: logging.LoggerAdapter,
 ) -> None:
@@ -251,14 +253,34 @@ async def _finalize(
         download_url=f"/api/jobs/{job.id}/download",
     )
 
-    if job.options.delivery.upload_to_drive:
+    # Cùng một quy tắc với lúc nhận request (đã chặn ở main.create_job), nên tới
+    # đây không còn ca "bật upload mà thiếu thư mục".
+    drive_folder = resolve_drive_output_folder(job.options, settings)
+    if drive_folder is not None:
         job.status = JobStatus.UPLOADING
         job.stage_message = "Đang upload lên Google Drive"
-        result = await upload_file(output_path, job.options.delivery.drive_folder_id)
+        result = await upload_file(output_path, drive_folder)
+        direct = drive_direct_url(result.file_id)
+        # THAY HẲN download_url bằng link Drive (xem docstring JobOutput): bước
+        # sau đọc đúng field cũ là có link video mới, không phải sửa gì.
         output = output.model_copy(
-            update={"drive_file_id": result.file_id, "drive_view_url": result.web_view_link}
+            update={
+                "drive_file_id": result.file_id,
+                "drive_view_url": result.web_view_link,
+                "drive_download_url": direct,
+                "download_url": direct,
+            }
         )
-        log.info("Upload Drive xong", extra={"drive_file_id": result.file_id})
+        # File đã nằm trên Drive nên bản trong /tmp (là RAM) hết việc: xoá ngay
+        # để trả bộ nhớ thay vì giữ tới hết JOB_TTL_SECONDS. Từ đây
+        # /api/jobs/{id}/download trả 404 "File output đã bị dọn" cho job có
+        # upload — đúng nghĩa "thay thế hoàn toàn", và cũng là điều làm
+        # --min-instances=0 trở nên an toàn: không còn gì phải giữ trong RAM.
+        await asyncio.to_thread(_unlink_output, output_path)
+        log.info(
+            "Upload Drive xong",
+            extra={"drive_file_id": result.file_id, "drive_folder_id": drive_folder},
+        )
 
     job.output = output
     job.progress = 100.0
@@ -266,6 +288,14 @@ async def _finalize(
     job.stage_message = "Hoàn tất"
     job.finished_at = utcnow()
     log.info("Job thành công", extra={"size_bytes": size_bytes})
+
+
+def _unlink_output(path: Path) -> None:
+    """Xoá output đã upload. Không xoá được thì janitor dọn sau, không phải lỗi job."""
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:  # pragma: no cover
+        logger.warning("Không xoá được output đã upload %s", path)
 
 
 def _mark_failed(

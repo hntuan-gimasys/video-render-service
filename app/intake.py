@@ -16,6 +16,7 @@ from pydantic import ValidationError
 
 from app.clips import parse_clip_lines
 from app.config import Settings
+from app.drive_folder import parse_folder_id
 from app.job_store import JobSources
 from app.models import ClipSpec, IntroTextOptions, RenderOptions
 from app.utils import InvalidOptions
@@ -28,6 +29,7 @@ __all__ = [
     "apply_form_overrides",
     "parse_edit_script",
     "parse_clips_field",
+    "resolve_drive_output_folder",
     "normalize_pasted_subtitle",
     "save_sources",
 ]
@@ -48,6 +50,51 @@ def file_size(path: Path) -> int | None:
 def clean(value: str | None) -> str | None:
     stripped = (value or "").strip()
     return stripped or None
+
+
+def resolve_drive_output_folder(options: RenderOptions, settings: Settings) -> str | None:
+    """Thư mục Drive sẽ nhận output. ``None`` nghĩa là không upload.
+
+    Ưu tiên ``delivery.drive_folder_id`` của request, sau đó tới env
+    ``DRIVE_OUTPUT_FOLDER_ID``.
+
+    Nhận cả LINK thư mục (dán nguyên link vào ô này là chuyện rất dễ xảy ra) và
+    tự rút id ra. Ngược lại, KHÔNG kiểm dạng của id trần: id thư mục thường ~33
+    ký tự nhưng id của chính một Shared Drive chỉ ~19, và ``root`` cũng là một
+    parent hợp lệ — siết theo độ dài như ``parse_folder_id`` làm cho link nguồn
+    sẽ chặn oan những ca dùng thật. Id sai thì Drive trả 404 và message đó đã
+    đủ rõ.
+
+    Bật ``upload_to_drive`` mà không có id nào là fail CHẮC CHẮN, không phải "có
+    thể": không truyền ``parents`` thì file rơi vào My Drive của chính service
+    account, mà service account KHÔNG có quota Drive nên Google trả
+    ``403 storageQuotaExceeded``. Cùng lý do đó, thư mục đích phải nằm trên
+    Shared Drive: file trong My Drive của người thật vẫn do service account sở
+    hữu nên vẫn tính vào quota (bằng 0) của nó, share quyền ghi cũng không cứu
+    được. Chặn ngay tại đây để thông báo nói đúng nguyên nhân.
+    """
+    wanted = options.delivery.upload_to_drive
+    if wanted is False:
+        return None
+    raw = clean(options.delivery.drive_folder_id) or clean(settings.drive_output_folder_id)
+    if wanted is None:
+        # Chưa khai: có thư mục cấu hình sẵn thì đẩy lên Drive, không thì thôi.
+        # Không báo lỗi ở nhánh này — người gọi chưa yêu cầu gì cả.
+        return raw or None
+    if not raw:
+        raise InvalidOptions(
+            "delivery.upload_to_drive=true nhưng không có thư mục Drive để đẩy vào",
+            detail=(
+                "Khai delivery.drive_folder_id, hoặc đặt env DRIVE_OUTPUT_FOLDER_ID. "
+                "Thư mục phải nằm trên Shared Drive và được chia sẻ quyền ghi cho "
+                "service account đang chạy service: service account không có quota "
+                "Drive nên đẩy vào My Drive của người thật sẽ bị 403 "
+                "storageQuotaExceeded."
+            ),
+        )
+    if raw.startswith(("http://", "https://")) or "/" in raw:
+        return parse_folder_id(raw)
+    return raw
 
 
 def parse_options(raw: str | None) -> RenderOptions:
