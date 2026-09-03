@@ -21,6 +21,25 @@ SAMPLE_SRT = (
 )
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Xoá mọi biến môi trường mà ``Settings`` đọc, trước MỖI test.
+
+    ``_env_file=None`` rải khắp các fixture chỉ tắt việc đọc file ``.env`` —
+    ``os.environ`` thì pydantic-settings VẪN đọc. Nên chỉ cần máy chạy export
+    một biến của service là kết quả test đổi theo máy. Đã đo: thêm
+    ``DRIVE_OUTPUT_FOLDER_ID`` vào khối ``env`` cấp workflow của CI làm 42 test
+    đổ, vì mọi job trong test tự bật upload lên Drive.
+
+    Xoá ở conftest gốc nên fixture này chạy TRƯỚC các conftest con (pytest gọi
+    theo thứ tự cha trước), còn ``tests/api/conftest.py`` vẫn tự ``setenv``
+    những biến nó cần sau đó.
+    """
+    for field in Settings.model_fields.values():
+        if field.alias:
+            monkeypatch.delenv(field.alias, raising=False)
+
+
 @pytest.fixture
 def default_options() -> RenderOptions:
     """Options mặc định theo SPEC §4 (client gửi `{}`)."""

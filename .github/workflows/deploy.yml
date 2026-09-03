@@ -28,10 +28,6 @@ env:
   # request phải tự khai delivery.drive_folder_id. PHẢI là thư mục trên Shared
   # Drive — service account không có quota Drive, xem
   # intake.resolve_drive_output_folder.
-  # Id thư mục không phải secret (quyền do việc chia sẻ Drive quyết định), nên
-  # để mặc định ngay đây theo đúng lối các config khác trong file này —
-  # khai repo variable cùng tên thì giá trị đó thắng.
-  DRIVE_OUTPUT_FOLDER_ID: ${{ vars.DRIVE_OUTPUT_FOLDER_ID || '1tp1dA8zEb-35L3M-Fx0XvSEE_wlTVySt' }}
   # API_KEY KHÔNG khai ở đây: nó là repo secret RENDER_API_KEY, truyền vào ở
   # step "Deploy to Cloud Run" — xem chú thích tại đó để biết vì sao không đi
   # qua Secret Manager nữa.
@@ -147,6 +143,13 @@ jobs:
       - name: Deploy to Cloud Run
         env:
           API_KEY: ${{ secrets.RENDER_API_KEY }}
+          # CHỈ khai ở step này, KHÔNG đưa lên khối env cấp workflow: khối đó áp
+          # cho cả job "test", và khi biến này có trong môi trường thì mọi
+          # Settings() trong test tự bật upload lên Drive -> 42 test đổ (đã đo).
+          # Id thư mục không phải secret (quyền do việc chia sẻ Drive quyết
+          # định) nên để mặc định ngay đây; khai repo variable cùng tên thì giá
+          # trị đó thắng.
+          DRIVE_OUTPUT_FOLDER_ID: ${{ vars.DRIVE_OUTPUT_FOLDER_ID || '1tp1dA8zEb-35L3M-Fx0XvSEE_wlTVySt' }}
         run: |
           # Thiếu key thì Settings (app/config.py) raise ngay lúc import: revision
           # mới không bao giờ ready và CI chỉ báo "failed to start", không nói gì
