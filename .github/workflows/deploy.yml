@@ -149,7 +149,15 @@ jobs:
           # Id thư mục không phải secret (quyền do việc chia sẻ Drive quyết
           # định) nên để mặc định ngay đây; khai repo variable cùng tên thì giá
           # trị đó thắng.
-          DRIVE_OUTPUT_FOLDER_ID: ${{ vars.DRIVE_OUTPUT_FOLDER_ID || '1tp1dA8zEb-35L3M-Fx0XvSEE_wlTVySt' }}
+          #
+          # PHẢI là Shared Drive (id bắt đầu bằng "0A"), không phải thư mục
+          # trong My Drive. Đã đo cả hai: thư mục My Drive 1tp1dA8zEb... trả
+          # 403 storageQuotaExceeded ("Service Accounts do not have storage
+          # quota") vì file do service account sở hữu mà SA có quota bằng 0,
+          # share Editor cũng không cứu được; Shared Drive thì file thuộc về
+          # chính drive đó nên không đụng quota của SA và job chạy thành công
+          # (job e42da8ec8034).
+          DRIVE_OUTPUT_FOLDER_ID: ${{ vars.DRIVE_OUTPUT_FOLDER_ID || '0AH10f1jCd2qEUk9PVA' }}
         run: |
           # Thiếu key thì Settings (app/config.py) raise ngay lúc import: revision
           # mới không bao giờ ready và CI chỉ báo "failed to start", không nói gì
