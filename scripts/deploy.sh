@@ -81,7 +81,7 @@ fi
 # MAX_DOWNLOAD_MB buộc đi cùng --memory ở lệnh deploy — xem chú thích tại đó.
 # DRIVE_OUTPUT_FOLDER_ID: thư mục Shared Drive nhận output; rỗng thì request phải
 # tự khai delivery.drive_folder_id.
-BASE_ENV_VARS="WORK_DIR=/tmp/jobs,MAX_DOWNLOAD_MB=1024,MAX_FOLDER_VIDEOS=30,MAX_CONCURRENT_JOBS=1,JOB_TTL_SECONDS=3600,LOG_LEVEL=INFO,DRIVE_OUTPUT_FOLDER_ID=${DRIVE_OUTPUT_FOLDER_ID:-}"
+BASE_ENV_VARS="WORK_DIR=/tmp/jobs,MAX_DOWNLOAD_MB=4096,MAX_FOLDER_VIDEOS=30,MAX_CONCURRENT_JOBS=1,JOB_TTL_SECONDS=3600,LOG_LEVEL=INFO,DRIVE_OUTPUT_FOLDER_ID=${DRIVE_OUTPUT_FOLDER_ID:-}"
 SECRET_ACCESS_GRANTED=1
 
 if [ "${USE_SECRET_MANAGER}" != "1" ]; then
@@ -168,12 +168,23 @@ fi
 # job deu cham di. Nguoc lai memory tinh theo GiB-giay bat ke co dung hay
 # khong, nen ha memory moi la tiet kiem that.
 #
-# --memory=4Gi BUOC di cung MAX_DOWNLOAD_MB=1024: /tmp la tmpfs (RAM) va trong
-# luc render workspace giu dong thoi video nguon + merged.mp4 + output.mp4
-# (_cleanup_inputs chi chay o cuoi). Tran cu 4096 MB chinh la ly do memory tung
-# phai la 16Gi. Sua mot trong hai so nay thi phai sua ca hai. Do that tren job
-# nang nhat: 85,7 MiB nguon + 19,3 MiB merged + 13,2 MiB output = ~118 MiB dinh,
-# tuc tran 1024 MB van con du gap nhieu lan.
+# --memory=16Gi di cung MAX_DOWNLOAD_MB=4096. TUNG ha xuong 4Gi/1024 va do la SAI:
+# job 3edfe19c0fd4 (12 clip, canvas 1080x1920, 4 nguon) bi ffmpeg thoat voi ma -9,
+# tuc SIGKILL cua cgroup OOM killer. Cloud Run KHONG ghi dong "Memory limit
+# exceeded" trong ca nay vi no chi giet tien trinh con to nhat (ffmpeg) chu khong
+# ha ca container, nen dau hieu duy nhat la ma -9.
+#
+# Ly do sizing hong: toi tinh memory theo kich thuoc FILE trong /tmp (85,7 MiB
+# nguon + 19,3 MiB merged + 13,2 MiB output = ~118 MiB) va bo qua working set cua
+# chinh ffmpeg. build_concat_command mo MOT filter_complex voi tat ca cac doan,
+# tuc 12 input dong thoi (cung mot file duoc mo nhieu lan) = 12 decoder h264 1080p
+# cung luc, moi decoder giu DPB toi 16 frame x 2,97 MiB, lai nhan them vi
+# frame-threading theo so vCPU. Job 2 clip o 716x1280 ma toi do luc chon 4Gi khong
+# he dai dien cho tai that.
+#
+# Va ha memory gan nhu KHONG tiet kiem gi khi da co --min-instances=0: memory chi
+# bi tinh trong luc job chay (~30-90 giay/job), con khoan 24/7 cho instance ngoi
+# khong da bien mat cung voi minScale. Doi lai la vo tai that -> khong danh doi.
 echo "==> Deploy"
 gcloud run deploy "${SERVICE}" \
   --image="${IMAGE}" \
@@ -182,7 +193,7 @@ gcloud run deploy "${SERVICE}" \
   --service-account="${SA_EMAIL}" \
   --execution-environment=gen2 \
   --cpu=4 \
-  --memory=4Gi \
+  --memory=16Gi \
   --cpu-boost \
   --no-cpu-throttling \
   --timeout=3600 \
