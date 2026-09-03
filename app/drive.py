@@ -93,8 +93,9 @@ def drive_direct_url(file_id: str) -> str:
     """Link lấy thẳng bytes của một file Drive.
 
     Khác ``webViewLink`` (trang xem của Drive, trả HTML): dạng ``uc?export=
-    download`` trả đúng nội dung file, nên nó mới là thứ thay được cho endpoint
-    ``/download`` cũ mà bên gọi không phải sửa gì.
+    download`` trả đúng nội dung file. Dùng cho MÁY gọi lấy bytes; link đưa cho
+    người bấm thì là ``webViewLink``, xem docstring của
+    :class:`app.job_models.JobOutput`.
 
     Link này KHÔNG mở công khai: người/máy gọi vẫn phải có quyền đọc file. File
     do service account tạo trong thư mục đích nên nó thừa hưởng quyền của thư

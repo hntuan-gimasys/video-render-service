@@ -144,11 +144,53 @@ async def test_run_job_uploads_to_drive(
     assert job.output is not None
     assert job.output.drive_file_id == "drive-id-1"
     assert job.output.drive_view_url == "https://drive.google.com/file/d/drive-id-1/view"
-    # download_url bị THAY HẲN bằng link Drive lấy thẳng bytes, để bước sau đọc
-    # đúng field cũ là có link video mới mà không phải sửa gì.
-    direct = "https://drive.google.com/uc?id=drive-id-1&export=download"
-    assert job.output.download_url == direct
-    assert job.output.drive_download_url == direct
+    # download_url bị THAY HẲN bằng link Drive, để bước sau đọc đúng field cũ là
+    # có link video mới mà không phải sửa gì. Là link XEM: nó được hiển thị cho
+    # người bấm, bấm vào phải mở trình phát chứ không tải file về máy.
+    assert job.output.download_url == "https://drive.google.com/file/d/drive-id-1/view"
+    assert job.output.download_url == job.output.drive_view_url
+    # Link lấy bytes vẫn còn, ở field riêng, cho máy gọi.
+    assert job.output.drive_download_url == (
+        "https://drive.google.com/uc?id=drive-id-1&export=download"
+    )
+
+
+async def test_upload_without_web_view_link_falls_back_to_the_direct_url(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Drive không trả webViewLink thì download_url phải có gì đó hợp lệ.
+
+    download_url là field BẮT BUỘC của JobOutput, để None là vỡ schema và client
+    nhận 500 sau khi job đã render xong.
+    """
+    _patch_render(monkeypatch)
+
+    class _NoLink:
+        file_id = "drive-id-2"
+        name = "output.mp4"
+        web_view_link = None
+
+    async def _fake_upload(src: Path, folder_id: str | None = None, **_kw: Any) -> _NoLink:
+        return _NoLink()
+
+    monkeypatch.setattr(jobs_mod, "upload_file", _fake_upload)
+    store = JobStore()
+    job = _make_job(
+        settings,
+        RenderOptions.model_validate(
+            {"delivery": {"upload_to_drive": True, "drive_folder_id": "folder-9"}}
+        ),
+    )
+    await store.create(job)
+
+    await run_job("job1", store, settings)
+
+    assert job.status is JobStatus.SUCCEEDED
+    assert job.output is not None
+    assert job.output.download_url == (
+        "https://drive.google.com/uc?id=drive-id-2&export=download"
+    )
+    assert job.output.drive_view_url is None
     # Và bản trong /tmp (là RAM) được xoá ngay, không giữ tới hết JOB_TTL_SECONDS.
     assert not job.output_path.exists()
 

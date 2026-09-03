@@ -48,12 +48,15 @@ _TERMINAL_STATUSES: Final[frozenset[JobStatus]] = frozenset(
 class JobOutput(BaseModel):
     """Kết quả của job.
 
-    ``download_url`` là link ĐỂ LẤY FILE, và nội dung của nó đổi theo cách giao
-    hàng: không upload thì là endpoint ``/api/jobs/{id}/download`` của service,
-    còn upload lên Drive thành công thì là link tải trực tiếp từ Drive. Cố ý
-    dùng lại đúng field này thay vì thêm field mới, để bước sau không phải sửa
-    gì khi bật upload — đây là chỗ lệch SPEC §3.2, nơi ``download_url`` được mô
-    tả là endpoint nội bộ.
+    ``download_url`` là LINK ĐỂ ĐƯA CHO NGƯỜI DÙNG, và nội dung của nó đổi theo
+    cách giao hàng: không upload thì là endpoint ``/api/jobs/{id}/download`` của
+    service, còn upload lên Drive thành công thì là link XEM của Drive (bấm vào
+    mở trình phát, không tải file về). Cố ý dùng lại đúng field này thay vì thêm
+    field mới, để bước sau không phải sửa gì khi bật upload — đây là chỗ lệch
+    SPEC §3.2, nơi ``download_url`` được mô tả là endpoint nội bộ trả file.
+
+    Cần lấy BYTES bằng máy thì dùng ``drive_download_url``, đừng dùng
+    ``download_url``: link xem trả HTML.
     """
 
     filename: str
@@ -61,9 +64,11 @@ class JobOutput(BaseModel):
     duration_seconds: float | None = None
     download_url: str
     drive_file_id: str | None = None
-    # Link mở trang xem của Drive (cho người bấm), khác download_url là link lấy
-    # thẳng bytes (cho máy gọi).
+    # Cùng giá trị với download_url khi upload thành công, chỉ khác là tên field
+    # nói rõ nó là link xem. Giữ cả hai: download_url để bên gọi cũ không phải
+    # sửa, drive_view_url để bên gọi mới đọc đúng tên.
     drive_view_url: str | None = None
+    # Link lấy thẳng bytes, cho máy gọi. Xem drive_direct_url trong app/drive.py.
     drive_download_url: str | None = None
 
 

@@ -263,12 +263,22 @@ async def _finalize(
         direct = drive_direct_url(result.file_id)
         # THAY HẲN download_url bằng link Drive (xem docstring JobOutput): bước
         # sau đọc đúng field cũ là có link video mới, không phải sửa gì.
+        #
+        # Đưa link XEM (webViewLink) vào đây, không phải link tải: link này được
+        # hiển thị cho người bấm, và bấm vào phải MỞ trình phát của Drive chứ
+        # không tải một file .mp4 về máy. Còn một lý do nữa: Shared Drive có tuỳ
+        # chọn "Viewers and commenters can't download/copy", bật nó lên là link
+        # dạng tải bị chặn với thành viên quyền Viewer trong khi link xem vẫn
+        # phát được. Ai cần bytes thì dùng drive_download_url.
+        #
+        # Fallback về link tải nếu Drive không trả webViewLink: download_url là
+        # field bắt buộc trong JobOutput, để None là vỡ schema.
         output = output.model_copy(
             update={
                 "drive_file_id": result.file_id,
                 "drive_view_url": result.web_view_link,
                 "drive_download_url": direct,
-                "download_url": direct,
+                "download_url": result.web_view_link or direct,
             }
         )
         # File đã nằm trên Drive nên bản trong /tmp (là RAM) hết việc: xoá ngay
