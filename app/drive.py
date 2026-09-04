@@ -10,9 +10,9 @@ import asyncio
 import logging
 import re
 import ssl
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass
-from functools import lru_cache
 from pathlib import Path
 from typing import Any, Final
 
@@ -48,6 +48,7 @@ __all__ = [
     "parse_drive_id",
     "drive_direct_url",
     "get_drive_service",
+    "reset_drive_service",
     "call_drive",
     "download_file",
     "upload_file",
@@ -105,24 +106,58 @@ def drive_direct_url(file_id: str) -> str:
     return f"https://drive.google.com/uc?id={file_id}&export=download"
 
 
-@lru_cache(maxsize=1)
+# Client Drive được cache THEO TỪNG THREAD, cố tình không dùng chung cả process.
+#
+# googleapiclient/httplib2 KHÔNG thread-safe: một ``Http`` giữ một socket TLS và
+# không có khoá nào bảo vệ. Mà mọi call Drive đều chạy trong thread của pool
+# (``asyncio.to_thread``), nên một client dùng chung nghĩa là hai thread cùng ghi
+# vào một socket.
+#
+# Hậu quả đã gặp thật trên production, không phải lo xa: container chết bằng
+# "Container terminated on signal 11" (SIGSEGV) đúng vào lúc job thứ hai bắt đầu
+# quét Drive trong khi job thứ nhất còn đang tải file — 09:05:41 job mới tạo,
+# 09:05:43 crash; lần thứ hai 09:06:59 và 09:07:00 hai POST cách nhau một giây,
+# 09:07:01 crash. Crash xoá sạch RAM nên MỌI job đang chạy biến mất một lúc, và
+# client đang poll nhận 404 cho job vừa được nhận 202 vài giây trước.
+#
+# Lưu ý cái bẫy đã làm chuyện này khó thấy: ``MAX_CONCURRENT_JOBS`` KHÔNG tuần tự
+# hoá giai đoạn tải — semaphore trong app/jobs.py chỉ bao bước render, còn
+# ``prepare_inputs`` nằm ngoài. Nên đặt nó bằng 1 vẫn có nhiều thread gọi Drive
+# cùng lúc.
+#
+# Cache theo thread giữ nguyên cái lợi ban đầu (dựng client khá đắt, và thread
+# pool tái dùng thread nên không phải dựng lại mỗi lượt) mà không chia sẻ socket.
+_thread_local = threading.local()
+
+
 def get_drive_service() -> Any:
-    """Drive v3 client dùng ADC (Cloud Run) hoặc GOOGLE_APPLICATION_CREDENTIALS.
+    """Drive v3 client CỦA RIÊNG thread đang gọi, dựng lần đầu rồi giữ lại.
 
-    Cache lại vì việc dựng client khá đắt. ``cache_clear()`` được trong test.
+    Dùng ADC (Cloud Run) hoặc ``GOOGLE_APPLICATION_CREDENTIALS``.
     """
-    import google.auth
-    from googleapiclient.discovery import build
+    service = getattr(_thread_local, "service", None)
+    if service is None:
+        import google.auth
+        from googleapiclient.discovery import build
 
-    credentials, _project = google.auth.default(scopes=list(DRIVE_SCOPES))
-    # cache_discovery=False: tránh ghi cache lên đĩa read-only của container.
-    return build("drive", "v3", credentials=credentials, cache_discovery=False)
+        credentials, _project = google.auth.default(scopes=list(DRIVE_SCOPES))
+        # cache_discovery=False: tránh ghi cache lên đĩa read-only của container.
+        service = build("drive", "v3", credentials=credentials, cache_discovery=False)
+        _thread_local.service = service
+    return service
 
 
-# Instance Cloud Run sống rất lâu (--min-instances=1 + --no-cpu-throttling) nên
-# client cache ở get_drive_service giữ đúng MỘT socket keep-alive suốt cả process.
-# Google đóng socket đó sau vài chục phút không dùng, và lần ghi kế tiếp chết ngay
-# bằng BrokenPipeError — đã gặp thật trên service: job 09:26 chạy xong, job 09:56
+def reset_drive_service() -> None:
+    """Bỏ client của RIÊNG thread đang gọi; lần sau nó tự dựng lại.
+
+    Cố ý không có cách nào xoá client của thread khác: làm vậy là chạm vào đối
+    tượng mà thread đó đang dùng, đúng thứ vừa gây SIGSEGV.
+    """
+    _thread_local.service = None
+
+
+# Client giữ socket keep-alive, và Google đóng socket đó sau một lúc không dùng.
+# Lần ghi kế tiếp chết ngay bằng BrokenPipeError — đã gặp thật trên service: job 09:26 chạy xong, job 09:56
 # fail sau 27 ms với "BrokenPipeError: [Errno 32] Broken pipe", cùng thư mục Drive
 # và cùng revision.
 #
@@ -137,7 +172,7 @@ def get_drive_service() -> Any:
 # gặp hơn — server đóng, getresponse() ra BadStatusLine — thì httplib2 tự close +
 # connect lại và hồi phục, nên chỉ nhánh ghi-lỗi này mới rò ra ngoài.)
 #
-# Nên cách duy nhất chắc chắn là bỏ client đang cache: dựng lại đồng nghĩa có
+# Nên cách duy nhất chắc chắn là bỏ client của thread đó: dựng lại đồng nghĩa có
 # httplib2.Http mới với pool connection rỗng.
 _TRANSPORT_ERRORS: Final[tuple[type[BaseException], ...]] = (
     # BrokenPipeError/ConnectionResetError/RemoteDisconnected đều là ConnectionError.
@@ -155,15 +190,28 @@ async def call_drive(func: Callable[..., Any], *args: Any) -> Any:
     quyền chia sẻ, 404 sai id, file quá lớn...) phải nổi lên ngay chứ không được
     che bằng retry.
     """
+    return await asyncio.to_thread(_call_with_retry, func, *args)
+
+
+def _call_with_retry(func: Callable[..., Any], *args: Any) -> Any:
+    """Chạy trong thread pool, và thử lại NGAY TRONG CÙNG THREAD.
+
+    Việc thử lại buộc phải nằm bên trong thread chứ không ở ``call_drive``: client
+    được cache theo thread, nên nếu bỏ client từ thread của event loop thì vừa bỏ
+    sai client (client của thread khác) vừa chạm vào đối tượng thread kia đang
+    dùng. Ngoài ra ``asyncio.to_thread`` không hứa xếp lần gọi sau vào đúng thread
+    cũ, nên tách hai lần gọi thành hai lượt to_thread là mất luôn quan hệ
+    "client vừa bỏ chính là client sắp dựng lại".
+    """
     try:
-        return await asyncio.to_thread(func, *args)
+        return func(*args)
     except _TRANSPORT_ERRORS as exc:
         logger.warning(
             "Kết nối Drive đã chết, dựng lại client rồi thử lại",
             extra={"drive_transport_error": _short(exc)},
         )
-        get_drive_service.cache_clear()
-        return await asyncio.to_thread(func, *args)
+        reset_drive_service()
+        return func(*args)
 
 
 def _get_metadata(file_id: str) -> DriveFileMeta:

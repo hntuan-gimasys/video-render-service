@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import itertools
 import logging
 import ssl
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -349,28 +351,112 @@ def test_no_extra_key_collides_with_logrecord_attrs() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# call_drive — socket keep-alive chết vì instance nằm im quá lâu
+# Client Drive cache theo THREAD — googleapiclient/httplib2 không thread-safe
 # --------------------------------------------------------------------------- #
-class _FakeCachedService:
-    """Đứng thay get_drive_service: gọi được, và đếm số lần bị cache_clear()."""
+def _fake_google(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Chặn google.auth + discovery.build để dựng client không cần mạng.
+
+    Hai module này được import BÊN TRONG get_drive_service nên phải patch trên
+    chính module, không patch được qua tên trong app.drive.
+    """
+    import google.auth
+    from googleapiclient import discovery
+
+    counter = itertools.count()
+    monkeypatch.setattr(google.auth, "default", lambda scopes=None: (object(), "proj"))
+    monkeypatch.setattr(
+        discovery, "build", lambda *_a, **_kw: "service-%d" % next(counter)
+    )
+
+
+def test_each_thread_gets_its_own_drive_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hai thread phải nhận HAI client khác nhau, cùng thread thì tái dùng.
+
+    Dùng chung một client giữa các thread là nguyên nhân container chết bằng
+    SIGSEGV trên production (xem chú thích trong app/drive.py): httplib2 giữ một
+    socket TLS không có khoá nào bảo vệ.
+    """
+    _fake_google(monkeypatch)
+    got: dict[str, object] = {}
+
+    def grab(name: str) -> None:
+        drive.reset_drive_service()
+        got[name] = drive.get_drive_service()
+        got[name + "-lan2"] = drive.get_drive_service()
+
+    threads = [threading.Thread(target=grab, args=(n,)) for n in ("a", "b")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert got["a"] != got["b"], "hai thread đang dùng CHUNG một client"
+    assert got["a"] == got["a-lan2"], "cùng thread phải tái dùng client, không dựng lại"
+    assert got["b"] == got["b-lan2"]
+
+
+def test_reset_only_touches_the_calling_thread(monkeypatch: pytest.MonkeyPatch) -> None:
+    """reset_drive_service không được chạm tới client của thread khác.
+
+    Bỏ client mà thread khác đang dùng chính là thứ vừa gây SIGSEGV.
+    """
+    _fake_google(monkeypatch)
+    drive.reset_drive_service()
+    mine = drive.get_drive_service()
+    seen: dict[str, object] = {}
+
+    def other() -> None:
+        seen["before"] = drive.get_drive_service()
+        drive.reset_drive_service()
+        seen["after"] = drive.get_drive_service()
+
+    thread = threading.Thread(target=other)
+    thread.start()
+    thread.join()
+
+    assert seen["before"] != seen["after"], "thread kia phải được client mới sau reset"
+    assert drive.get_drive_service() == mine, "client của thread này bị bỏ oan"
+
+
+# --------------------------------------------------------------------------- #
+# call_drive — socket keep-alive chết vì không dùng một lúc
+# --------------------------------------------------------------------------- #
+class _ResetCounter:
+    """Đứng thay reset_drive_service để đếm số lần client bị bỏ."""
 
     def __init__(self) -> None:
-        self.builds = 0
-        self.cleared = 0
+        self.count = 0
 
-    def __call__(self) -> str:
-        self.builds += 1
-        return "service"
+    def __call__(self) -> None:
+        self.count += 1
 
-    def cache_clear(self) -> None:
-        self.cleared += 1
+
+async def test_call_drive_retries_in_the_same_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cả hai lần gọi phải ở CÙNG một thread.
+
+    Client cache theo thread, nên nếu lần thử lại rơi sang thread khác thì việc
+    bỏ client vừa rồi chẳng liên quan gì tới client sắp được dùng.
+    """
+    threads: list[int] = []
+
+    def _flaky() -> str:
+        threads.append(threading.get_ident())
+        if len(threads) == 1:
+            raise BrokenPipeError(32, "Broken pipe")
+        return "ok"
+
+    assert await drive.call_drive(_flaky) == "ok"
+    assert len(threads) == 2
+    assert len(set(threads)) == 1, "lần thử lại chạy ở thread khác"
 
 
 async def test_call_drive_rebuilds_client_after_a_dead_socket(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    fake = _FakeCachedService()
-    monkeypatch.setattr(drive, "get_drive_service", fake)
+    reset = _ResetCounter()
+    monkeypatch.setattr(drive, "reset_drive_service", reset)
     calls: list[int] = []
 
     def _flaky() -> str:
@@ -381,15 +467,15 @@ async def test_call_drive_rebuilds_client_after_a_dead_socket(
 
     assert await drive.call_drive(_flaky) == "ok"
     assert len(calls) == 2
-    assert fake.cleared == 1, "phải bỏ client đang cache trước khi thử lại"
+    assert reset.count == 1, "phải bỏ client của thread đó trước khi thử lại"
 
 
 async def test_call_drive_retries_a_dead_tls_socket(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Socket TLS chết giữa đường ra SSLEOFError, không thuộc ConnectionError.
-    fake = _FakeCachedService()
-    monkeypatch.setattr(drive, "get_drive_service", fake)
+    reset = _ResetCounter()
+    monkeypatch.setattr(drive, "reset_drive_service", reset)
     calls: list[int] = []
 
     def _flaky() -> str:
@@ -399,14 +485,14 @@ async def test_call_drive_retries_a_dead_tls_socket(
         return "ok"
 
     assert await drive.call_drive(_flaky) == "ok"
-    assert fake.cleared == 1
+    assert reset.count == 1
 
 
 async def test_call_drive_does_not_retry_a_permission_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    fake = _FakeCachedService()
-    monkeypatch.setattr(drive, "get_drive_service", fake)
+    reset = _ResetCounter()
+    monkeypatch.setattr(drive, "reset_drive_service", reset)
     calls: list[int] = []
 
     def _forbidden() -> str:
@@ -416,14 +502,14 @@ async def test_call_drive_does_not_retry_a_permission_error(
     with pytest.raises(RuntimeError):
         await drive.call_drive(_forbidden)
     assert len(calls) == 1, "lỗi quyền không được che bằng retry"
-    assert fake.cleared == 0
+    assert reset.count == 0
 
 
 async def test_call_drive_gives_up_after_one_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    fake = _FakeCachedService()
-    monkeypatch.setattr(drive, "get_drive_service", fake)
+    reset = _ResetCounter()
+    monkeypatch.setattr(drive, "reset_drive_service", reset)
     calls: list[int] = []
 
     def _always_dead() -> str:
