@@ -328,6 +328,24 @@ async def download_job(job_id: str, request: Request, store: StoreDep) -> Respon
     # có gì để stream nữa. Job KHÔNG upload (deploy không đặt
     # DRIVE_OUTPUT_FOLDER_ID) vẫn đi đúng đường cũ bên dưới.
     if job.output is not None and job.output.drive_file_id:
+        # Hai kiểu client cần hai thứ TRÁI NGƯỢC nhau ở đây, nên phải phân theo
+        # Accept chứ không có một câu trả lời vừa cả hai:
+        #
+        # - Người bấm vào link (browser điều hướng, Accept: text/html,...) cần
+        #   302 để tới thẳng trình phát Drive.
+        # - Client gọi bằng fetch/XHR — kể cả nút Execute của Swagger, nó gửi
+        #   Accept: application/json — thì KHÔNG đi qua được redirect này: fetch
+        #   tự đi theo Location sang drive.google.com, một origin khác cần phiên
+        #   đăng nhập Google, nên nó chỉ báo "Failed to fetch". Đã đo: curl -L
+        #   không mang credential nhận 401 từ Drive. Với chúng thì phải trả link
+        #   trong BODY.
+        #
+        # Body trả nguyên object output (schema JobOutput) chứ không bọc thêm tên
+        # khoá mới: bên gọi đã đọc download_url từ GET /api/jobs/{id} thì dùng lại
+        # đúng code phân tích đó được, không phải học thêm khoá nào.
+        accept = request.headers.get("accept") or ""
+        if "application/json" in accept:
+            return JSONResponse(job.output.model_dump(mode="json"))
         # 302 chứ không 301: link này gắn với một job cụ thể và job sẽ hết hạn,
         # không được để client hay proxy cache lại như một chuyển hướng vĩnh viễn.
         return RedirectResponse(job.output.download_url, status_code=302)

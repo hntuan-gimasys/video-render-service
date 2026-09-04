@@ -135,14 +135,29 @@ async def test_download_redirects_to_the_drive_link_when_uploaded(
         assert final["status"] == JobStatus.SUCCEEDED.value, final
         assert final["output"]["download_url"] == view
         # KHÔNG kèm auth: endpoint này mở công khai (SPEC §3.3), và chuyển hướng
-        # cũng phải mở như vậy.
-        response = await client.get(f"/api/jobs/{job_id}/download")
+        # cũng phải mở như vậy. Accept kiểu browser điều hướng.
+        response = await client.get(
+            f"/api/jobs/{job_id}/download",
+            headers={"Accept": "text/html,application/xhtml+xml,*/*;q=0.8"},
+        )
+        # Client gọi bằng fetch/XHR (Swagger gửi đúng header này) không đi qua
+        # được redirect sang Drive, nên với chúng link phải nằm trong body.
+        as_json = await client.get(
+            f"/api/jobs/{job_id}/download", headers={"Accept": "application/json"}
+        )
 
     # 302 chứ không 301: link gắn với một job sẽ hết hạn, không được cache vĩnh viễn.
     assert response.status_code == 302
     assert response.headers["location"] == view
     # httpx không tự đi theo redirect nên body phải rỗng, không phải video.
     assert response.content == b""
+
+    assert as_json.status_code == 200
+    body = as_json.json()
+    # Cùng tên khoá với GET /api/jobs/{id} để bên gọi dùng lại đúng code cũ.
+    assert body["download_url"] == view
+    assert body["drive_view_url"] == view
+    assert body["drive_file_id"] == "abc123"
 
 
 async def test_download_still_streams_when_there_is_no_drive_upload(
