@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from typing import Any
 
@@ -100,6 +101,63 @@ async def test_download_open_ended_range(fake_render: dict[str, Any]) -> None:
 )
 def test_parse_range(header: str | None, size: int, expected: tuple[int, int]) -> None:
     assert parse_range(header, size) == expected
+
+
+# --------------------------------------------------------------------------- #
+# Output nằm trên Drive: endpoint này chuyển hướng chứ không trả 404
+# --------------------------------------------------------------------------- #
+async def test_download_redirects_to_the_drive_link_when_uploaded(
+    fake_render: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Bản trong /tmp bị xoá ngay sau upload nên không còn gì để stream.
+
+    Nhưng bên gọi đang trỏ vào endpoint này thì vẫn phải tới được video, nên nó
+    chuyển hướng sang link XEM của Drive thay vì báo "File output đã bị dọn".
+    """
+    view = "https://drive.google.com/file/d/abc123/view?usp=drivesdk"
+
+    class _Result:
+        file_id = "abc123"
+        name = "output.mp4"
+        web_view_link = view
+
+    async def _fake_upload(_src: Path, _folder: str | None = None, **_kw: Any) -> _Result:
+        return _Result()
+
+    monkeypatch.setattr(jobs_mod, "upload_file", _fake_upload)
+    options = json.dumps(
+        {"delivery": {"upload_to_drive": True, "drive_folder_id": "0AFolderId"}}
+    )
+    async with await _client() as client:
+        created = await client.post("/api/jobs", headers=AUTH, data=_form(options=options))
+        job_id = created.json()["job_id"]
+        final = await _wait_terminal(client, job_id)
+        assert final["status"] == JobStatus.SUCCEEDED.value, final
+        assert final["output"]["download_url"] == view
+        # KHÔNG kèm auth: endpoint này mở công khai (SPEC §3.3), và chuyển hướng
+        # cũng phải mở như vậy.
+        response = await client.get(f"/api/jobs/{job_id}/download")
+
+    # 302 chứ không 301: link gắn với một job sẽ hết hạn, không được cache vĩnh viễn.
+    assert response.status_code == 302
+    assert response.headers["location"] == view
+    # httpx không tự đi theo redirect nên body phải rỗng, không phải video.
+    assert response.content == b""
+
+
+async def test_download_still_streams_when_there_is_no_drive_upload(
+    fake_render: dict[str, Any],
+) -> None:
+    """Deploy không đặt DRIVE_OUTPUT_FOLDER_ID thì đường cũ phải nguyên vẹn."""
+    async with await _client() as client:
+        created = await client.post("/api/jobs", headers=AUTH, data=_form())
+        job_id = created.json()["job_id"]
+        await _wait_terminal(client, job_id)
+        response = await client.get(f"/api/jobs/{job_id}/download")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "video/mp4"
+    assert response.content == b"MP4DATA" * 100
 
 
 # --------------------------------------------------------------------------- #

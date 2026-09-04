@@ -13,7 +13,7 @@ from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, Form, Request, Response
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import ValidationError
 
@@ -312,6 +312,25 @@ async def download_job(job_id: str, request: Request, store: StoreDep) -> Respon
         raise JobNotFound()
     if job.status is not JobStatus.SUCCEEDED:
         raise JobNotReady(f"Job đang ở trạng thái {job.status.value}")
+
+    # Job đã đẩy lên Drive thì bản trong /tmp bị xoá NGAY sau upload, trước cả
+    # lúc job được đánh dấu succeeded (xem _finalize trong app/jobs.py) — nên ở
+    # đây không còn file nào để stream. Chuyển hướng sang link Drive thay vì trả
+    # 404: bản thân endpoint này vẫn là "link tới video", ai bấm vào vẫn tới
+    # được trình phát, và bên gọi đang trỏ vào đây không phải sửa gì.
+    #
+    # Dùng thẳng output.download_url chứ không tự chọn lại giữa link xem và link
+    # tải: _finalize đã quyết định một lần (link XEM, có fallback về link tải khi
+    # Drive không trả webViewLink), giữ một nguồn quyết định duy nhất.
+    #
+    # Cố tình lệch SPEC §3.3, nơi endpoint này được mô tả là trả
+    # StreamingResponse kèm Content-Length: khi output nằm trên Drive thì không
+    # có gì để stream nữa. Job KHÔNG upload (deploy không đặt
+    # DRIVE_OUTPUT_FOLDER_ID) vẫn đi đúng đường cũ bên dưới.
+    if job.output is not None and job.output.drive_file_id:
+        # 302 chứ không 301: link này gắn với một job cụ thể và job sẽ hết hạn,
+        # không được để client hay proxy cache lại như một chuyển hướng vĩnh viễn.
+        return RedirectResponse(job.output.download_url, status_code=302)
 
     path = job.output_path
     total_size = await asyncio.to_thread(file_size, path)
